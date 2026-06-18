@@ -3,9 +3,12 @@ fn main() {
     {
         let mut resource = winresource::WindowsResource::new();
         resource.set_icon("../codex-plus-manager/src-tauri/icons/icon.ico");
-        resource.set_manifest(include_str!(
-            "../codex-plus-manager/src-tauri/windows-app-manifest.xml"
-        ));
+        let manifest = if std::env::var("PROFILE").as_deref() == Ok("release") {
+            include_str!("../codex-plus-manager/src-tauri/windows-app-manifest.xml")
+        } else {
+            include_str!("../codex-plus-manager/src-tauri/windows-app-manifest-dev.xml")
+        };
+        resource.set_manifest(manifest);
         resource.compile().expect("compile launcher icon resource");
     }
 }

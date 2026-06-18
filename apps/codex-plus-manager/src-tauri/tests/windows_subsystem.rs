@@ -46,12 +46,15 @@ fn launcher_binary_embeds_codex_icon_resource() {
 }
 
 #[test]
-fn windows_binaries_request_administrator_privileges() {
+fn windows_binaries_request_administrator_privileges_in_release_and_run_normally_in_dev() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let manager_build =
         std::fs::read_to_string(manifest_dir.join("build.rs")).expect("read manager build.rs");
     let windows_manifest = std::fs::read_to_string(manifest_dir.join("windows-app-manifest.xml"))
         .expect("read windows app manifest");
+    let windows_dev_manifest =
+        std::fs::read_to_string(manifest_dir.join("windows-app-manifest-dev.xml"))
+            .expect("read dev windows app manifest");
     let launcher_build = manifest_dir
         .parent()
         .and_then(std::path::Path::parent)
@@ -67,10 +70,16 @@ fn windows_binaries_request_administrator_privileges() {
     let windows_installer =
         std::fs::read_to_string(&windows_installer).expect("read windows installer");
 
+    assert!(manager_build.contains("PROFILE"));
     assert!(manager_build.contains("windows-app-manifest.xml"));
+    assert!(manager_build.contains("windows-app-manifest-dev.xml"));
+    assert!(launcher_build.contains("PROFILE"));
     assert!(launcher_build.contains("windows-app-manifest.xml"));
+    assert!(launcher_build.contains("windows-app-manifest-dev.xml"));
     assert!(windows_manifest.contains("requireAdministrator"));
+    assert!(windows_dev_manifest.contains("asInvoker"));
     assert!(windows_manifest.contains("Microsoft.Windows.Common-Controls"));
+    assert!(windows_dev_manifest.contains("Microsoft.Windows.Common-Controls"));
     assert!(windows_installer.contains("RequestExecutionLevel admin"));
 }
 
