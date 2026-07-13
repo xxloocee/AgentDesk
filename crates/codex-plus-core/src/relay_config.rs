@@ -365,7 +365,8 @@ pub fn apply_relay_profile_files_to_home_with_context(
         &profile.context_window,
         &profile.auto_compact_limit,
     )?;
-    apply_relay_files_to_home(home, &config_with_limits, &profile.auth_contents)
+    let config_with_catalog = apply_model_catalog_to_config(home, profile, &config_with_limits)?;
+    apply_relay_files_to_home(home, &config_with_catalog, &profile.auth_contents)
 }
 
 pub fn apply_relay_profile_to_home_with_switch_rules(
@@ -401,11 +402,12 @@ pub fn apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
         &profile.context_window,
         &profile.auto_compact_limit,
     )?;
+    let config_with_catalog = apply_model_catalog_to_config(home, profile, &config_with_limits)?;
 
     if profile.relay_mode == crate::settings::RelayMode::PureApi {
         apply_relay_files_to_home_with_computer_use_guard(
             home,
-            &config_with_limits,
+            &config_with_catalog,
             &profile.auth_contents,
             preserve_computer_use_guard,
         )
@@ -413,7 +415,7 @@ pub fn apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
         let auth_contents = official_profile_auth_for_switch(home, &profile.auth_contents)?;
         apply_relay_files_to_home_with_computer_use_guard(
             home,
-            &config_with_limits,
+            &config_with_catalog,
             &auth_contents,
             preserve_computer_use_guard,
         )
@@ -437,13 +439,17 @@ pub fn apply_relay_profile_config_to_home_with_context(
         &profile.context_window,
         &profile.auto_compact_limit,
     )?;
-    apply_relay_config_file_to_home(home, &config_with_limits)
+    let config_with_catalog = apply_model_catalog_to_config(home, profile, &config_with_limits)?;
+    apply_relay_config_file_to_home(home, &config_with_catalog)
 }
 
 pub fn apply_relay_config_file_to_home(
     home: &Path,
     config_contents: &str,
 ) -> anyhow::Result<RelayApplyResult> {
+    let config_contents = config_contents
+        .strip_prefix('\u{feff}')
+        .unwrap_or(config_contents);
     if config_contents.trim().is_empty() {
         anyhow::bail!("config.toml 内容不能为空");
     }
@@ -667,6 +673,8 @@ pub fn backfill_relay_profile_from_home(
 ) -> anyhow::Result<()> {
     profile.config_contents = read_optional_text(&home.join("config.toml"))?;
     profile.auth_contents = read_optional_text(&home.join("auth.json"))?;
+    let live_config = profile.config_contents.clone();
+    sync_context_limits_from_config(profile, &live_config);
     if profile.model.trim().is_empty() {
         if let Some(model) = root_key_string(&profile.config_contents, "model") {
             profile.model = model;
@@ -693,6 +701,7 @@ pub fn backfill_relay_profile_from_home_with_common(
     profile.auth_contents = read_optional_text(&home.join("auth.json"))?;
     restore_profile_auth_from_live_config(profile, &template_auth)?;
     sync_profile_mode_from_backfilled_live(profile);
+    sync_context_limits_from_config(profile, &live_config);
     if profile.model.trim().is_empty() {
         if let Some(model) = root_key_string(&live_config, "model") {
             profile.model = model;
@@ -1060,11 +1069,28 @@ fn write_codex_live_atomic(
             };
             Some(guarded)
         }
-        Some(config_text) => Some(config_text.to_string()),
+        Some(config_text) => Some(normalize_config_text_for_write(config_text)),
         None => None,
     };
     #[cfg(windows)]
     let config_text = guarded_config_text.as_deref();
+
+    let config_text = match config_text {
+        Some(config_text) => Some(preserve_live_marketplace_configs(home, config_text)?),
+        None => None,
+    };
+    let config_text = config_text.as_deref();
+
+    let config_text = match config_text {
+        Some(config_text) => Some(
+            crate::plugin_marketplace::preserve_openai_curated_remote_marketplace_config(
+                home,
+                config_text,
+            )?,
+        ),
+        None => None,
+    };
+    let config_text = config_text.as_deref();
 
     if let Some(config_text) = config_text {
         validate_toml_config(config_text, &config_path)?;
@@ -1098,6 +1124,47 @@ fn write_codex_live_atomic(
     Ok(backup_path)
 }
 
+fn preserve_live_marketplace_configs(home: &Path, config_text: &str) -> anyhow::Result<String> {
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    if live_config.trim().is_empty() {
+        return Ok(config_text.to_string());
+    }
+
+    let mut target = parse_toml_document(config_text)?;
+    let live = parse_toml_document(&live_config)?;
+    let Some(live_marketplaces) = live.get("marketplaces").and_then(Item::as_table_like) else {
+        return Ok(ensure_trailing_newline(target.to_string()));
+    };
+    if live_marketplaces.is_empty() {
+        return Ok(ensure_trailing_newline(target.to_string()));
+    }
+
+    if target.get("marketplaces").is_none() {
+        target["marketplaces"] = toml_edit::table();
+    }
+    if target
+        .get("marketplaces")
+        .and_then(Item::as_table_like)
+        .is_none()
+    {
+        target["marketplaces"] = toml_edit::table();
+    }
+    let Some(target_marketplaces) = target
+        .get_mut("marketplaces")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return Ok(ensure_trailing_newline(target.to_string()));
+    };
+
+    for (name, marketplace) in live_marketplaces.iter() {
+        if target_marketplaces.get(name).is_none() {
+            target_marketplaces.insert(name, marketplace.clone());
+        }
+    }
+
+    Ok(ensure_trailing_newline(target.to_string()))
+}
+
 fn active_provider_id(doc: &DocumentMut) -> Option<String> {
     doc.get("model_provider")
         .and_then(Item::as_str)
@@ -1126,12 +1193,13 @@ fn provider_table_exists(doc: &DocumentMut, provider_id: &str) -> bool {
 }
 
 fn parse_toml_document(contents: &str) -> anyhow::Result<DocumentMut> {
+    let contents = contents.trim_start_matches('\u{feff}');
     if contents.trim().is_empty() {
         Ok(DocumentMut::new())
     } else {
         contents
             .parse::<DocumentMut>()
-            .with_context(|| "config.toml TOML 解析失败")
+            .map_err(|error| anyhow::anyhow!("config.toml TOML 解析失败：{error}"))
     }
 }
 
@@ -1224,14 +1292,13 @@ fn normalize_duplicate_toml_text(contents: &str) -> String {
             continue;
         }
 
-        if in_root
-            && !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && let Some((key, _)) = trimmed.split_once('=')
-        {
-            let key = key.trim();
-            if !key.is_empty() && !key.contains('.') && !seen_root_keys.insert(key.to_string()) {
-                continue;
+        if in_root && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some((key, _)) = trimmed.split_once('=') {
+                let key = key.trim();
+                if !key.is_empty() && !key.contains('.') && !seen_root_keys.insert(key.to_string())
+                {
+                    continue;
+                }
             }
         }
 
@@ -1266,12 +1333,12 @@ fn strip_common_config_text_fallback(config_text: &str, common_config: &str) -> 
             continue;
         }
 
-        if !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && let Some((key, _)) = trimmed.split_once('=')
-            && anchors.root_keys.contains(key.trim())
-        {
-            continue;
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some((key, _)) = trimmed.split_once('=') {
+                if anchors.root_keys.contains(key.trim()) {
+                    continue;
+                }
+            }
         }
 
         kept.push(line);
@@ -1298,14 +1365,12 @@ fn common_config_anchors(common_config: &str) -> CommonConfigAnchors {
             continue;
         }
 
-        if in_root
-            && !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && let Some((key, _)) = trimmed.split_once('=')
-        {
-            let key = key.trim();
-            if !key.is_empty() {
-                root_keys.insert(key.to_string());
+        if in_root && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some((key, _)) = trimmed.split_once('=') {
+                let key = key.trim();
+                if !key.is_empty() {
+                    root_keys.insert(key.to_string());
+                }
             }
         }
     }
@@ -1317,6 +1382,7 @@ fn common_config_anchors(common_config: &str) -> CommonConfigAnchors {
 }
 
 fn validate_toml_config(config_text: &str, path: &Path) -> anyhow::Result<()> {
+    let config_text = config_text.trim_start_matches('\u{feff}');
     if config_text.trim().is_empty() {
         return Ok(());
     }
@@ -1324,6 +1390,10 @@ fn validate_toml_config(config_text: &str, path: &Path) -> anyhow::Result<()> {
         .parse::<toml::Table>()
         .with_context(|| format!("{} 不是有效 TOML", path.display()))?;
     Ok(())
+}
+
+fn normalize_config_text_for_write(config_text: &str) -> String {
+    config_text.trim_start_matches('\u{feff}').to_string()
 }
 
 fn validate_auth_json(auth_bytes: &[u8], path: &Path) -> anyhow::Result<()> {
@@ -1362,6 +1432,90 @@ fn apply_context_limits_to_config(
         doc["model_auto_compact_token_limit"] = toml_edit::value(value as i64);
     }
     Ok(normalize_optional_toml(doc))
+}
+
+fn apply_model_catalog_to_config(
+    home: &Path,
+    profile: &RelayProfile,
+    config_text: &str,
+) -> anyhow::Result<String> {
+    let catalog_relative = format!(
+        "model-catalogs/{}.json",
+        sanitize_catalog_filename(&profile.id)
+    );
+    // 用户已手写 model_catalog_json 指针时保留，不覆盖（保 preserves_user_model_catalog_json 测试）
+    // 仅当现有指针指向本 profile 自己生成的 catalog 时才重新生成。
+    if let Some(existing) = root_key_string(config_text, "model_catalog_json") {
+        if existing != catalog_relative {
+            return Ok(config_text.to_string());
+        }
+    }
+    let (model_list, model_windows): (String, std::collections::HashMap<String, String>) =
+        if profile.model_windows.trim().is_empty() && profile.model_list.contains('[') {
+            crate::model_suffix::migrate_model_list_with_suffixes(&profile.model_list)
+        } else {
+            (
+                profile.model_list.clone(),
+                serde_json::from_str(&profile.model_windows).unwrap_or_default(),
+            )
+        };
+    let entries =
+        crate::model_suffix::collect_catalog_entries(&model_list, &model_windows, &profile.model);
+    // 无后缀条目则 no-op，保持现有 per-profile 单值行为（保 does_not_write 测试）
+    if !entries.iter().any(|entry| entry.suffix_window.is_some()) {
+        return Ok(config_text.to_string());
+    }
+    let fallback = parse_optional_positive_u64(&profile.context_window, "上下文大小")?;
+    let catalog_path = home.join(&catalog_relative);
+    if let Some(parent) = catalog_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let catalog_json = crate::model_suffix::build_model_catalog_json(&entries, fallback);
+    std::fs::write(&catalog_path, catalog_json)?;
+    let mut doc = parse_toml_document(config_text)?;
+    doc["model_catalog_json"] = toml_edit::value(catalog_relative);
+    Ok(normalize_optional_toml(doc))
+}
+
+fn sanitize_catalog_filename(id: &str) -> String {
+    id.chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || char == '-' || char == '_' {
+                char
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn sync_context_limits_from_config(profile: &mut RelayProfile, config_text: &str) {
+    if let Some(value) = root_positive_int_string(config_text, "model_context_window") {
+        profile.context_window = value;
+    }
+    if let Some(value) = root_positive_int_string(config_text, "model_auto_compact_token_limit") {
+        profile.auto_compact_limit = value;
+    }
+}
+
+fn root_positive_int_string(config_text: &str, key: &str) -> Option<String> {
+    if let Ok(doc) = parse_toml_document(config_text) {
+        if let Some(value) = doc
+            .get(key)
+            .and_then(Item::as_value)
+            .and_then(toml_edit::Value::as_integer)
+            .filter(|value| *value > 0)
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    root_key_value(config_text, key)
+        .and_then(|value| value.split('#').next())
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
 }
 
 fn toml_value_is_subset(target: &toml_edit::Value, source: &toml_edit::Value) -> bool {
@@ -1728,7 +1882,12 @@ pub fn relay_profile_model(profile: &RelayProfile) -> String {
         .unwrap_or_else(|| profile.model.trim().to_string())
 }
 
-fn relay_profile_base_url(profile: &RelayProfile) -> String {
+pub fn relay_profile_base_url(profile: &RelayProfile) -> String {
+    if profile.relay_mode == crate::settings::RelayMode::Aggregate {
+        return crate::protocol_proxy::local_responses_proxy_base_url(
+            crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        );
+    }
     if profile.protocol == RelayProtocol::ChatCompletions {
         if !profile.upstream_base_url.trim().is_empty() {
             return profile.upstream_base_url.trim().to_string();
@@ -1759,7 +1918,10 @@ fn relay_profile_base_url(profile: &RelayProfile) -> String {
     }
 }
 
-fn relay_profile_api_key(profile: &RelayProfile) -> String {
+pub fn relay_profile_api_key(profile: &RelayProfile) -> String {
+    if profile.relay_mode == crate::settings::RelayMode::Aggregate {
+        return "codex-plus-aggregate".to_string();
+    }
     if profile.relay_mode == crate::settings::RelayMode::Official {
         return experimental_bearer_token_from_config(&profile.config_contents)
             .ok()
@@ -1782,7 +1944,22 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
     let provider_id = active_or_default_provider_id(&doc);
     set_provider_id(&mut doc, &provider_id);
 
-    let model = relay_profile_model(profile);
+    let mut model = relay_profile_model(profile);
+    // 若用户未填写默认模型，但 model_list 有内容，则取第一条作为默认 model，
+    // 避免 codex 启动时回退到历史会话中带后缀的模型名。
+    if model.trim().is_empty() && !profile.model_list.trim().is_empty() {
+        if let Some(first) = profile
+            .model_list
+            .split(['\r', '\n', ','])
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+        {
+            model = crate::model_suffix::parse_model_suffix(first).0;
+        }
+    }
+    // 若用户把后缀语法（如 deepseek-v4-flash[1M]）写在 model 字段，
+    // 写入 config.toml 前需剥离后缀；codex 本身不理解后缀，只会按原串匹配 catalog slug。
+    let (model, _) = crate::model_suffix::parse_model_suffix(&model);
     if !model.trim().is_empty() {
         doc["model"] = toml_edit::value(model.trim());
     }
@@ -1840,13 +2017,33 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
 }
 
 pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow::Result<()> {
+    if profile.model_windows.trim().is_empty() && profile.model_list.contains('[') {
+        let (clean_list, windows) =
+            crate::model_suffix::migrate_model_list_with_suffixes(&profile.model_list);
+        profile.model_list = clean_list;
+        profile.model_windows = serde_json::to_string(&windows).unwrap_or_default();
+    }
     if profile.relay_mode == crate::settings::RelayMode::Official && !profile.official_mix_api_key {
-        profile.config_contents.clear();
+        let has_api_config = !profile.base_url.trim().is_empty()
+            || !profile.api_key.trim().is_empty()
+            || codex_auth_api_key(&profile.auth_contents).is_some()
+            || config_has_model_provider(profile.config_contents.as_str());
+        if has_api_config {
+            profile.config_contents.clear();
+        }
+        if !profile.model_list.trim().is_empty() {
+            profile.model_list = merge_model_into_model_list(&profile.model, &profile.model_list);
+        }
         profile.model.clear();
         profile.base_url.clear();
         profile.upstream_base_url.clear();
         profile.api_key.clear();
-        profile.auth_contents = remove_openai_api_key_from_auth_contents(&profile.auth_contents)?;
+        if auth_contents_looks_like_chatgpt_auth(&profile.auth_contents) {
+            profile.auth_contents =
+                remove_openai_api_key_from_auth_contents(&profile.auth_contents)?;
+        } else {
+            profile.auth_contents.clear();
+        }
         return Ok(());
     }
     let source_base_url = relay_profile_base_url(profile);
@@ -1869,6 +2066,7 @@ pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow
         profile.auth_contents = remove_openai_api_key_from_auth_contents(&profile.auth_contents)?;
     }
     profile.model = relay_profile_model(profile);
+    profile.model_list = merge_model_into_model_list(&profile.model, &profile.model_list);
     profile.upstream_base_url = source_base_url.clone();
     profile.base_url = source_base_url;
     profile.api_key = relay_profile_api_key(profile);
@@ -1889,6 +2087,48 @@ fn remove_openai_api_key_from_auth_contents(auth_contents: &str) -> anyhow::Resu
         return Ok(String::new());
     }
     Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
+}
+
+fn merge_model_into_model_list(model: &str, model_list: &str) -> String {
+    let model = model.trim();
+    let mut models = Vec::new();
+    if !model.is_empty() {
+        models.push(model.to_string());
+    }
+    for item in model_list.split(['\r', '\n', ',']).map(str::trim) {
+        if !item.is_empty() && !models.iter().any(|existing| existing == item) {
+            models.push(item.to_string());
+        }
+    }
+    models.join("\n")
+}
+
+fn config_has_model_provider(config_contents: &str) -> bool {
+    parse_toml_document(config_contents)
+        .ok()
+        .and_then(|doc| {
+            doc.get("model_provider")
+                .and_then(Item::as_str)
+                .map(str::to_string)
+        })
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn auth_contents_looks_like_chatgpt_auth(contents: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(contents) else {
+        return false;
+    };
+    let is_chatgpt = value
+        .get("auth_mode")
+        .and_then(Value::as_str)
+        .map(|mode| mode.eq_ignore_ascii_case("chatgpt"))
+        .unwrap_or(false);
+    is_chatgpt
+        && value
+            .get("tokens")
+            .map(tokens_have_login_secret)
+            .unwrap_or(false)
 }
 
 fn provider_string_from_config(config_contents: &str, key: &str) -> Option<String> {

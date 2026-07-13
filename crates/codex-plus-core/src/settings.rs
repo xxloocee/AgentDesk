@@ -82,11 +82,47 @@ pub struct RelayProfile {
     #[serde(rename = "modelList", default)]
     pub model_list: String,
     #[serde(
+        rename = "modelWindows",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub model_windows: String,
+    #[serde(
         rename = "userAgent",
         default,
         skip_serializing_if = "String::is_empty"
     )]
     pub user_agent: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AggregateRelayStrategy {
+    #[default]
+    Failover,
+    ConversationRoundRobin,
+    RequestRoundRobin,
+    WeightedRoundRobin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregateRelayMember {
+    #[serde(rename = "relayId")]
+    pub relay_id: String,
+    #[serde(default = "default_aggregate_member_weight")]
+    pub weight: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregateRelayProfile {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub strategy: AggregateRelayStrategy,
+    #[serde(default)]
+    pub members: Vec<AggregateRelayMember>,
 }
 
 impl Default for RelayProfile {
@@ -111,6 +147,7 @@ impl Default for RelayProfile {
             auto_compact_limit: String::new(),
             model_insert_mode: RelayModelInsertMode::Patch,
             model_list: String::new(),
+            model_windows: String::new(),
             user_agent: String::new(),
         }
     }
@@ -139,6 +176,7 @@ pub enum RelayMode {
     #[default]
     MixedApi,
     PureApi,
+    Aggregate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -161,22 +199,24 @@ pub struct BackendSettings {
     pub enhancements_enabled: bool,
     #[serde(rename = "computerUseGuardEnabled", default)]
     pub computer_use_guard_enabled: bool,
-    #[serde(rename = "codexAppPluginEntryUnlock", default = "default_true")]
-    pub codex_app_plugin_entry_unlock: bool,
     #[serde(rename = "codexAppPluginMarketplaceUnlock", default = "default_true")]
     pub codex_app_plugin_marketplace_unlock: bool,
-    #[serde(rename = "codexAppForcePluginInstall", default = "default_true")]
-    pub codex_app_force_plugin_install: bool,
+    #[serde(rename = "codexAppPluginAutoExpand", default = "default_true")]
+    pub codex_app_plugin_auto_expand: bool,
     #[serde(rename = "codexAppModelWhitelistUnlock", default = "default_true")]
     pub codex_app_model_whitelist_unlock: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
     pub codex_app_session_delete: bool,
     #[serde(rename = "codexAppMarkdownExport", default = "default_true")]
     pub codex_app_markdown_export: bool,
+    #[serde(rename = "codexAppPasteFix", default)]
+    pub codex_app_paste_fix: bool,
+    #[serde(rename = "codexAppForceChineseLocale", default = "default_true")]
+    pub codex_app_force_chinese_locale: bool,
+    #[serde(rename = "codexAppFastStartup", default)]
+    pub codex_app_fast_startup: bool,
     #[serde(rename = "codexAppProjectMove", default = "default_true")]
     pub codex_app_project_move: bool,
-    #[serde(rename = "codexAppConversationTimeline", default = "default_true")]
-    pub codex_app_conversation_timeline: bool,
     #[serde(rename = "codexAppThreadIdBadge", default)]
     pub codex_app_thread_id_badge: bool,
     #[serde(rename = "codexAppConversationView", default)]
@@ -195,8 +235,52 @@ pub struct BackendSettings {
     pub codex_app_upstream_worktree_create: bool,
     #[serde(rename = "codexAppNativeMenuPlacement", default = "default_true")]
     pub codex_app_native_menu_placement: bool,
+    #[serde(rename = "codexAppNativeMenuLocalization", default = "default_true")]
+    pub codex_app_native_menu_localization: bool,
     #[serde(rename = "codexAppServiceTierControls", default)]
     pub codex_app_service_tier_controls: bool,
+    #[serde(rename = "codexAppPetRealMouseLook", default)]
+    pub codex_app_pet_real_mouse_look: bool,
+    #[serde(rename = "codexAppStepwiseEnabled", default)]
+    pub codex_app_stepwise_enabled: bool,
+    #[serde(rename = "codexAppStepwiseDirectSend", default)]
+    pub codex_app_stepwise_direct_send: bool,
+    #[serde(rename = "codexAppStepwiseBaseUrl", default)]
+    pub codex_app_stepwise_base_url: String,
+    #[serde(rename = "codexAppStepwiseApiKey", default)]
+    pub codex_app_stepwise_api_key: String,
+    #[serde(
+        rename = "codexAppStepwiseApiKeyEnv",
+        default = "default_stepwise_api_key_env",
+        deserialize_with = "empty_as_default_stepwise_api_key_env"
+    )]
+    pub codex_app_stepwise_api_key_env: String,
+    #[serde(rename = "codexAppStepwiseModel", default)]
+    pub codex_app_stepwise_model: String,
+    #[serde(
+        rename = "codexAppStepwiseMaxItems",
+        default = "default_stepwise_max_items",
+        deserialize_with = "deserialize_stepwise_max_items"
+    )]
+    pub codex_app_stepwise_max_items: u8,
+    #[serde(
+        rename = "codexAppStepwiseMaxInputChars",
+        default = "default_stepwise_max_input_chars",
+        deserialize_with = "deserialize_stepwise_max_input_chars"
+    )]
+    pub codex_app_stepwise_max_input_chars: u32,
+    #[serde(
+        rename = "codexAppStepwiseMaxOutputTokens",
+        default = "default_stepwise_max_output_tokens",
+        deserialize_with = "deserialize_stepwise_max_output_tokens"
+    )]
+    pub codex_app_stepwise_max_output_tokens: u32,
+    #[serde(
+        rename = "codexAppStepwiseTimeoutMs",
+        default = "default_stepwise_timeout_ms",
+        deserialize_with = "deserialize_stepwise_timeout_ms"
+    )]
+    pub codex_app_stepwise_timeout_ms: u64,
     #[serde(rename = "codexAppImageOverlayEnabled", default)]
     pub codex_app_image_overlay_enabled: bool,
     #[serde(rename = "codexAppImageOverlayPath", default)]
@@ -207,6 +291,12 @@ pub struct BackendSettings {
         deserialize_with = "deserialize_image_overlay_opacity"
     )]
     pub codex_app_image_overlay_opacity: u8,
+    #[serde(
+        rename = "codexAppImageOverlayFitMode",
+        default = "default_image_overlay_fit_mode",
+        deserialize_with = "deserialize_image_overlay_fit_mode"
+    )]
+    pub codex_app_image_overlay_fit_mode: String,
     #[serde(rename = "codexGoalsEnabled", default)]
     pub codex_goals_enabled: bool,
     #[serde(rename = "launchMode", default)]
@@ -223,20 +313,12 @@ pub struct BackendSettings {
     pub relay_context_config_contents: String,
     #[serde(rename = "activeRelayId", default = "default_active_relay_id")]
     pub active_relay_id: String,
+    #[serde(rename = "aggregateRelayProfiles", default)]
+    pub aggregate_relay_profiles: Vec<AggregateRelayProfile>,
+    #[serde(rename = "activeAggregateRelayId", default)]
+    pub active_aggregate_relay_id: String,
     #[serde(rename = "relayTestModel", default = "default_relay_test_model")]
     pub relay_test_model: String,
-    #[serde(rename = "cliWrapperEnabled", default)]
-    pub cli_wrapper_enabled: bool,
-    #[serde(rename = "cliWrapperBaseUrl", default)]
-    pub cli_wrapper_base_url: String,
-    #[serde(rename = "cliWrapperApiKey", default)]
-    pub cli_wrapper_api_key: String,
-    #[serde(
-        rename = "cliWrapperApiKeyEnv",
-        default = "default_api_key_env",
-        deserialize_with = "empty_as_default_api_key_env"
-    )]
-    pub cli_wrapper_api_key_env: String,
 }
 
 impl Default for BackendSettings {
@@ -251,14 +333,15 @@ impl Default for BackendSettings {
             relay_profiles_enabled: true,
             enhancements_enabled: true,
             computer_use_guard_enabled: false,
-            codex_app_plugin_entry_unlock: true,
             codex_app_plugin_marketplace_unlock: true,
-            codex_app_force_plugin_install: true,
+            codex_app_plugin_auto_expand: true,
             codex_app_model_whitelist_unlock: true,
             codex_app_session_delete: true,
             codex_app_markdown_export: true,
+            codex_app_paste_fix: false,
+            codex_app_force_chinese_locale: true,
+            codex_app_fast_startup: false,
             codex_app_project_move: true,
-            codex_app_conversation_timeline: true,
             codex_app_thread_id_badge: false,
             codex_app_conversation_view: false,
             codex_app_thread_scroll_restore: true,
@@ -268,10 +351,23 @@ impl Default for BackendSettings {
             zed_remote_sync_to_zed_settings: false,
             codex_app_upstream_worktree_create: true,
             codex_app_native_menu_placement: true,
+            codex_app_native_menu_localization: true,
             codex_app_service_tier_controls: false,
+            codex_app_pet_real_mouse_look: false,
+            codex_app_stepwise_enabled: false,
+            codex_app_stepwise_direct_send: false,
+            codex_app_stepwise_base_url: String::new(),
+            codex_app_stepwise_api_key: String::new(),
+            codex_app_stepwise_api_key_env: default_stepwise_api_key_env(),
+            codex_app_stepwise_model: String::new(),
+            codex_app_stepwise_max_items: default_stepwise_max_items(),
+            codex_app_stepwise_max_input_chars: default_stepwise_max_input_chars(),
+            codex_app_stepwise_max_output_tokens: default_stepwise_max_output_tokens(),
+            codex_app_stepwise_timeout_ms: default_stepwise_timeout_ms(),
             codex_app_image_overlay_enabled: false,
             codex_app_image_overlay_path: String::new(),
             codex_app_image_overlay_opacity: default_image_overlay_opacity(),
+            codex_app_image_overlay_fit_mode: default_image_overlay_fit_mode(),
             codex_goals_enabled: false,
             launch_mode: LaunchMode::Patch,
             relay_base_url: default_relay_base_url(),
@@ -280,11 +376,9 @@ impl Default for BackendSettings {
             relay_common_config_contents: String::new(),
             relay_context_config_contents: String::new(),
             active_relay_id: default_active_relay_id(),
+            aggregate_relay_profiles: Vec::new(),
+            active_aggregate_relay_id: String::new(),
             relay_test_model: default_relay_test_model(),
-            cli_wrapper_enabled: false,
-            cli_wrapper_base_url: String::new(),
-            cli_wrapper_api_key: String::new(),
-            cli_wrapper_api_key_env: default_api_key_env(),
         }
     }
 }
@@ -324,6 +418,7 @@ impl BackendSettings {
                 auto_compact_limit: String::new(),
                 model_insert_mode: RelayModelInsertMode::Patch,
                 model_list: String::new(),
+                model_windows: String::new(),
                 user_agent: String::new(),
             };
         }
@@ -368,13 +463,60 @@ impl BackendSettings {
             auto_compact_limit: String::new(),
             model_insert_mode: RelayModelInsertMode::Patch,
             model_list: String::new(),
+            model_windows: String::new(),
             user_agent: String::new(),
         }
     }
+
+    pub fn active_aggregate_relay_profile(&self) -> Option<AggregateRelayProfile> {
+        let active_relay = self
+            .relay_profiles
+            .iter()
+            .find(|profile| profile.id == self.active_relay_id)?;
+        if active_relay.relay_mode != RelayMode::Aggregate {
+            return None;
+        }
+
+        let active_aggregate_id = if self.active_aggregate_relay_id.trim().is_empty() {
+            active_relay.id.as_str()
+        } else {
+            self.active_aggregate_relay_id.trim()
+        };
+
+        if active_aggregate_id != active_relay.id {
+            return None;
+        }
+
+        self.aggregate_relay_profiles
+            .iter()
+            .find(|profile| profile.id == active_aggregate_id)
+            .cloned()
+    }
+
+    pub fn active_relay_uses_protocol_proxy(&self) -> bool {
+        self.active_aggregate_relay_profile().is_some()
+            || self.active_relay_profile().protocol == RelayProtocol::ChatCompletions
+    }
 }
 
-pub fn default_api_key_env() -> String {
-    "CUSTOM_OPENAI_API_KEY".to_string()
+pub fn default_stepwise_api_key_env() -> String {
+    "CODEX_STEPWISE_API_KEY".to_string()
+}
+
+pub fn default_stepwise_max_items() -> u8 {
+    6
+}
+
+pub fn default_stepwise_max_input_chars() -> u32 {
+    6000
+}
+
+pub fn default_stepwise_max_output_tokens() -> u32 {
+    500
+}
+
+pub fn default_stepwise_timeout_ms() -> u64 {
+    8000
 }
 
 fn default_image_overlay_opacity() -> u8 {
@@ -383,6 +525,33 @@ fn default_image_overlay_opacity() -> u8 {
 
 fn clamp_image_overlay_opacity(value: u8) -> u8 {
     value.clamp(1, 100)
+}
+
+pub fn default_image_overlay_fit_mode() -> String {
+    "fit".to_string()
+}
+
+fn normalize_image_overlay_fit_mode(value: &str) -> String {
+    match value {
+        "fill" | "fit" | "stretch" | "tile" | "center" => value.to_string(),
+        _ => default_image_overlay_fit_mode(),
+    }
+}
+
+pub fn clamp_stepwise_max_items(value: u8) -> u8 {
+    value.min(default_stepwise_max_items())
+}
+
+pub fn clamp_stepwise_max_input_chars(value: u32) -> u32 {
+    value.clamp(1000, 24000)
+}
+
+pub fn clamp_stepwise_max_output_tokens(value: u32) -> u32 {
+    value.clamp(100, 4000)
+}
+
+pub fn clamp_stepwise_timeout_ms(value: u64) -> u64 {
+    value.clamp(1000, 60000)
 }
 
 pub fn default_true() -> bool {
@@ -405,14 +574,18 @@ pub fn default_relay_profiles() -> Vec<RelayProfile> {
     vec![RelayProfile::default()]
 }
 
-pub fn empty_as_default_api_key_env<'de, D>(deserializer: D) -> Result<String, D::Error>
+pub fn default_aggregate_member_weight() -> u32 {
+    1
+}
+
+pub fn empty_as_default_stepwise_api_key_env<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = Option::<String>::deserialize(deserializer)?;
     Ok(value
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(default_api_key_env))
+        .unwrap_or_else(default_stepwise_api_key_env))
 }
 
 fn deserialize_image_overlay_opacity<'de, D>(deserializer: D) -> Result<u8, D::Error>
@@ -422,6 +595,51 @@ where
     Ok(Option::<u8>::deserialize(deserializer)?
         .map(clamp_image_overlay_opacity)
         .unwrap_or_else(default_image_overlay_opacity))
+}
+
+fn deserialize_image_overlay_fit_mode<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?
+        .map(|value| normalize_image_overlay_fit_mode(&value))
+        .unwrap_or_else(default_image_overlay_fit_mode))
+}
+
+fn deserialize_stepwise_max_items<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u8>::deserialize(deserializer)?
+        .map(clamp_stepwise_max_items)
+        .unwrap_or_else(default_stepwise_max_items))
+}
+
+fn deserialize_stepwise_max_input_chars<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u32>::deserialize(deserializer)?
+        .map(clamp_stepwise_max_input_chars)
+        .unwrap_or_else(default_stepwise_max_input_chars))
+}
+
+fn deserialize_stepwise_max_output_tokens<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u32>::deserialize(deserializer)?
+        .map(clamp_stepwise_max_output_tokens)
+        .unwrap_or_else(default_stepwise_max_output_tokens))
+}
+
+fn deserialize_stepwise_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .map(clamp_stepwise_timeout_ms)
+        .unwrap_or_else(default_stepwise_timeout_ms))
 }
 
 fn deserialize_profile_api_key<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -556,14 +774,15 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     {
         target.insert("computerUseGuardEnabled".to_string(), Value::Bool(value));
     }
-    merge_bool_setting(target, source, "codexAppPluginEntryUnlock");
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
-    merge_bool_setting(target, source, "codexAppForcePluginInstall");
+    merge_bool_setting(target, source, "codexAppPluginAutoExpand");
     merge_bool_setting(target, source, "codexAppModelWhitelistUnlock");
     merge_bool_setting(target, source, "codexAppSessionDelete");
     merge_bool_setting(target, source, "codexAppMarkdownExport");
+    merge_bool_setting(target, source, "codexAppPasteFix");
+    merge_bool_setting(target, source, "codexAppForceChineseLocale");
+    merge_bool_setting(target, source, "codexAppFastStartup");
     merge_bool_setting(target, source, "codexAppProjectMove");
-    merge_bool_setting(target, source, "codexAppConversationTimeline");
     merge_bool_setting(target, source, "codexAppThreadIdBadge");
     merge_bool_setting(target, source, "codexAppConversationView");
     merge_bool_setting(target, source, "codexAppThreadScrollRestore");
@@ -577,7 +796,88 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "zedRemoteSyncToZedSettings");
     merge_bool_setting(target, source, "codexAppUpstreamWorktreeCreate");
     merge_bool_setting(target, source, "codexAppNativeMenuPlacement");
+    merge_bool_setting(target, source, "codexAppNativeMenuLocalization");
     merge_bool_setting(target, source, "codexAppServiceTierControls");
+    merge_bool_setting(target, source, "codexAppPetRealMouseLook");
+    merge_bool_setting(target, source, "codexAppStepwiseEnabled");
+    merge_bool_setting(target, source, "codexAppStepwiseDirectSend");
+    if let Some(value) = source
+        .get("codexAppStepwiseBaseUrl")
+        .and_then(Value::as_str)
+    {
+        target.insert(
+            "codexAppStepwiseBaseUrl".to_string(),
+            Value::String(value.trim().trim_end_matches('/').to_string()),
+        );
+    }
+    if let Some(value) = source.get("codexAppStepwiseApiKey").and_then(Value::as_str) {
+        target.insert(
+            "codexAppStepwiseApiKey".to_string(),
+            Value::String(value.trim().to_string()),
+        );
+    }
+    if let Some(value) = source
+        .get("codexAppStepwiseApiKeyEnv")
+        .and_then(Value::as_str)
+    {
+        target.insert(
+            "codexAppStepwiseApiKeyEnv".to_string(),
+            Value::String(if value.trim().is_empty() {
+                default_stepwise_api_key_env()
+            } else {
+                value.trim().to_string()
+            }),
+        );
+    }
+    if let Some(value) = source.get("codexAppStepwiseModel").and_then(Value::as_str) {
+        target.insert(
+            "codexAppStepwiseModel".to_string(),
+            Value::String(value.trim().to_string()),
+        );
+    }
+    if let Some(value) = source
+        .get("codexAppStepwiseMaxItems")
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+    {
+        target.insert(
+            "codexAppStepwiseMaxItems".to_string(),
+            Value::Number(serde_json::Number::from(clamp_stepwise_max_items(value))),
+        );
+    }
+    if let Some(value) = source
+        .get("codexAppStepwiseMaxInputChars")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+    {
+        target.insert(
+            "codexAppStepwiseMaxInputChars".to_string(),
+            Value::Number(serde_json::Number::from(clamp_stepwise_max_input_chars(
+                value,
+            ))),
+        );
+    }
+    if let Some(value) = source
+        .get("codexAppStepwiseMaxOutputTokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+    {
+        target.insert(
+            "codexAppStepwiseMaxOutputTokens".to_string(),
+            Value::Number(serde_json::Number::from(clamp_stepwise_max_output_tokens(
+                value,
+            ))),
+        );
+    }
+    if let Some(value) = source
+        .get("codexAppStepwiseTimeoutMs")
+        .and_then(Value::as_u64)
+    {
+        target.insert(
+            "codexAppStepwiseTimeoutMs".to_string(),
+            Value::Number(serde_json::Number::from(clamp_stepwise_timeout_ms(value))),
+        );
+    }
     merge_bool_setting(target, source, "codexAppImageOverlayEnabled");
     if let Some(value) = source
         .get("codexAppImageOverlayPath")
@@ -596,6 +896,15 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
         target.insert(
             "codexAppImageOverlayOpacity".to_string(),
             Value::Number(serde_json::Number::from(clamp_image_overlay_opacity(value))),
+        );
+    }
+    if let Some(value) = source
+        .get("codexAppImageOverlayFitMode")
+        .and_then(Value::as_str)
+    {
+        target.insert(
+            "codexAppImageOverlayFitMode".to_string(),
+            Value::String(normalize_image_overlay_fit_mode(value)),
         );
     }
     if let Some(value) = source.get("codexGoalsEnabled").and_then(Value::as_bool) {
@@ -645,6 +954,21 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
             Value::String(value.to_string()),
         );
     }
+    if let Some(value) = source
+        .get("aggregateRelayProfiles")
+        .and_then(Value::as_array)
+    {
+        target.insert(
+            "aggregateRelayProfiles".to_string(),
+            Value::Array(value.clone()),
+        );
+    }
+    if let Some(value) = source.get("activeAggregateRelayId").and_then(Value::as_str) {
+        target.insert(
+            "activeAggregateRelayId".to_string(),
+            Value::String(value.to_string()),
+        );
+    }
     if let Some(value) = source.get("relayTestModel").and_then(Value::as_str) {
         target.insert(
             "relayTestModel".to_string(),
@@ -652,31 +976,6 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
                 default_relay_test_model()
             } else {
                 value.trim().to_string()
-            }),
-        );
-    }
-    if let Some(value) = source.get("cliWrapperEnabled").and_then(Value::as_bool) {
-        target.insert("cliWrapperEnabled".to_string(), Value::Bool(value));
-    }
-    if let Some(value) = source.get("cliWrapperBaseUrl").and_then(Value::as_str) {
-        target.insert(
-            "cliWrapperBaseUrl".to_string(),
-            Value::String(value.to_string()),
-        );
-    }
-    if let Some(value) = source.get("cliWrapperApiKey").and_then(Value::as_str) {
-        target.insert(
-            "cliWrapperApiKey".to_string(),
-            Value::String(value.to_string()),
-        );
-    }
-    if let Some(value) = source.get("cliWrapperApiKeyEnv").and_then(Value::as_str) {
-        target.insert(
-            "cliWrapperApiKeyEnv".to_string(),
-            Value::String(if value.is_empty() {
-                default_api_key_env()
-            } else {
-                value.to_string()
             }),
         );
     }
@@ -766,12 +1065,13 @@ fn active_provider_id(doc: &DocumentMut) -> Option<String> {
 }
 
 fn parse_toml_document(contents: &str) -> anyhow::Result<DocumentMut> {
+    let contents = contents.trim_start_matches('\u{feff}');
     if contents.trim().is_empty() {
         Ok(DocumentMut::new())
     } else {
         contents
             .parse::<DocumentMut>()
-            .with_context(|| "config.toml TOML 解析失败")
+            .map_err(|error| anyhow::anyhow!("config.toml TOML 解析失败：{error}"))
     }
 }
 
@@ -796,6 +1096,29 @@ fn normalize_settings_config_sections(mut settings: BackendSettings) -> BackendS
     }
     settings.codex_app_image_overlay_opacity =
         clamp_image_overlay_opacity(settings.codex_app_image_overlay_opacity);
+    settings.codex_app_image_overlay_fit_mode =
+        normalize_image_overlay_fit_mode(&settings.codex_app_image_overlay_fit_mode);
+    settings.codex_app_stepwise_base_url = settings
+        .codex_app_stepwise_base_url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    settings.codex_app_stepwise_api_key = settings.codex_app_stepwise_api_key.trim().to_string();
+    settings.codex_app_stepwise_api_key_env =
+        if settings.codex_app_stepwise_api_key_env.trim().is_empty() {
+            default_stepwise_api_key_env()
+        } else {
+            settings.codex_app_stepwise_api_key_env.trim().to_string()
+        };
+    settings.codex_app_stepwise_model = settings.codex_app_stepwise_model.trim().to_string();
+    settings.codex_app_stepwise_max_items =
+        clamp_stepwise_max_items(settings.codex_app_stepwise_max_items);
+    settings.codex_app_stepwise_max_input_chars =
+        clamp_stepwise_max_input_chars(settings.codex_app_stepwise_max_input_chars);
+    settings.codex_app_stepwise_max_output_tokens =
+        clamp_stepwise_max_output_tokens(settings.codex_app_stepwise_max_output_tokens);
+    settings.codex_app_stepwise_timeout_ms =
+        clamp_stepwise_timeout_ms(settings.codex_app_stepwise_timeout_ms);
     settings
 }
 
@@ -901,10 +1224,10 @@ mod tests {
         assert!(settings.relay_profiles_enabled);
         assert!(settings.enhancements_enabled);
         assert!(!settings.computer_use_guard_enabled);
-        assert!(settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
-        assert!(settings.codex_app_force_plugin_install);
+        assert!(settings.codex_app_plugin_auto_expand);
         assert!(!settings.codex_app_thread_id_badge);
+        assert!(settings.codex_app_force_chinese_locale);
         assert!(!settings.codex_goals_enabled);
         assert!(settings.codex_app_path.is_empty());
         assert!(settings.codex_extra_args.is_empty());
@@ -914,18 +1237,30 @@ mod tests {
         );
         assert!(settings.zed_remote_project_registry_enabled);
         assert!(!settings.zed_remote_sync_to_zed_settings);
+        assert!(settings.codex_app_native_menu_localization);
         assert_eq!(settings.launch_mode, LaunchMode::Patch);
         assert_eq!(settings.relay_base_url, default_relay_base_url());
         assert!(settings.relay_api_key.is_empty());
         assert_eq!(settings.relay_profiles[0].relay_mode, RelayMode::Official);
         assert!(settings.relay_common_config_contents.is_empty());
         assert_eq!(settings.relay_test_model, default_relay_test_model());
-        assert!(!settings.cli_wrapper_enabled);
-        assert_eq!(settings.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
+        assert!(!settings.codex_app_stepwise_enabled);
+        assert!(!settings.codex_app_stepwise_direct_send);
+        assert!(settings.codex_app_stepwise_base_url.is_empty());
+        assert!(settings.codex_app_stepwise_api_key.is_empty());
+        assert_eq!(
+            settings.codex_app_stepwise_api_key_env,
+            "CODEX_STEPWISE_API_KEY"
+        );
+        assert!(settings.codex_app_stepwise_model.is_empty());
+        assert_eq!(settings.codex_app_stepwise_max_items, 6);
+        assert_eq!(settings.codex_app_stepwise_max_input_chars, 6000);
+        assert_eq!(settings.codex_app_stepwise_max_output_tokens, 500);
+        assert_eq!(settings.codex_app_stepwise_timeout_ms, 8000);
     }
 
     #[test]
-    fn settings_deserialize_uses_existing_json_keys() {
+    fn settings_deserialize_ignores_removed_cli_wrapper_keys() {
         let settings: BackendSettings = serde_json::from_str(
             r#"{"codexAppPath":"C:\\Portable\\Codex\\app","providerSyncEnabled":true,"codexGoalsEnabled":true,"cliWrapperEnabled":true,"cliWrapperBaseUrl":"https://example.test","cliWrapperApiKey":"sk-test","cliWrapperApiKeyEnv":""}"#,
         )
@@ -933,40 +1268,37 @@ mod tests {
         assert_eq!(settings.codex_app_path, r"C:\Portable\Codex\app");
         assert!(settings.provider_sync_enabled);
         assert!(settings.codex_goals_enabled);
-        assert!(settings.cli_wrapper_enabled);
-        assert_eq!(settings.cli_wrapper_base_url, "https://example.test");
-        assert_eq!(settings.cli_wrapper_api_key, "sk-test");
-        assert_eq!(settings.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
         assert_eq!(settings.relay_base_url, default_relay_base_url());
         assert!(settings.codex_extra_args.is_empty());
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved.get("cliWrapperEnabled").is_none());
+        assert!(saved.get("cliWrapperBaseUrl").is_none());
+        assert!(saved.get("cliWrapperApiKey").is_none());
+        assert!(saved.get("cliWrapperApiKeyEnv").is_none());
     }
 
     #[test]
-    fn settings_deserialize_keeps_plugin_unlock_switches_independent() {
+    fn settings_deserialize_keeps_plugin_marketplace_unlock_switch() {
         let settings: BackendSettings = serde_json::from_str(
             r#"{
-                "codexAppPluginEntryUnlock": false,
                 "codexAppPluginMarketplaceUnlock": true,
-                "codexAppForcePluginInstall": false
+                "codexAppPluginAutoExpand": false
             }"#,
         )
         .unwrap();
 
-        assert!(!settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
-        assert!(!settings.codex_app_force_plugin_install);
+        assert!(!settings.codex_app_plugin_auto_expand);
 
         let legacy_settings: BackendSettings = serde_json::from_str(
             r#"{
-                "codexAppPluginEntryUnlock": false,
                 "codexAppForcePluginInstall": false
             }"#,
         )
         .unwrap();
 
-        assert!(!legacy_settings.codex_app_plugin_entry_unlock);
         assert!(legacy_settings.codex_app_plugin_marketplace_unlock);
-        assert!(!legacy_settings.codex_app_force_plugin_install);
+        assert!(legacy_settings.codex_app_plugin_auto_expand);
     }
 
     #[test]
@@ -1359,10 +1691,6 @@ experimental_bearer_token = "sk-existing""#
         let store = SettingsStore::new(dir.join("nested").join("settings.json"));
         let settings = BackendSettings {
             provider_sync_enabled: true,
-            cli_wrapper_enabled: true,
-            cli_wrapper_base_url: "https://example.test".to_string(),
-            cli_wrapper_api_key: "sk-test".to_string(),
-            cli_wrapper_api_key_env: "CUSTOM_ENV".to_string(),
             codex_extra_args: vec!["--force_high_performance_gpu".to_string()],
             ..BackendSettings::default()
         };
@@ -1373,15 +1701,69 @@ experimental_bearer_token = "sk-existing""#
     }
 
     #[test]
+    fn settings_store_save_load_roundtrip_preserves_aggregate_relay_settings() {
+        let dir = temp_dir();
+        let store = SettingsStore::new(dir.join("settings.json"));
+        let settings = BackendSettings {
+            relay_profiles: vec![
+                RelayProfile {
+                    id: "relay-a".to_string(),
+                    name: "中转 A".to_string(),
+                    ..RelayProfile::default()
+                },
+                RelayProfile {
+                    id: "relay-b".to_string(),
+                    name: "中转 B".to_string(),
+                    ..RelayProfile::default()
+                },
+                RelayProfile {
+                    id: "agg".to_string(),
+                    name: "聚合".to_string(),
+                    relay_mode: RelayMode::Aggregate,
+                    ..RelayProfile::default()
+                },
+            ],
+            active_relay_id: "agg".to_string(),
+            aggregate_relay_profiles: vec![AggregateRelayProfile {
+                id: "agg".to_string(),
+                name: "聚合".to_string(),
+                strategy: AggregateRelayStrategy::WeightedRoundRobin,
+                members: vec![
+                    AggregateRelayMember {
+                        relay_id: "relay-a".to_string(),
+                        weight: 1,
+                    },
+                    AggregateRelayMember {
+                        relay_id: "relay-b".to_string(),
+                        weight: 3,
+                    },
+                ],
+            }],
+            active_aggregate_relay_id: "agg".to_string(),
+            ..BackendSettings::default()
+        };
+
+        store.save(&settings).unwrap();
+
+        let loaded = store.load().unwrap();
+        let expected = normalize_settings_config_sections(settings);
+        let active_aggregate = loaded.active_aggregate_relay_profile().unwrap();
+        assert_eq!(loaded, expected);
+        assert_eq!(
+            active_aggregate.strategy,
+            AggregateRelayStrategy::WeightedRoundRobin
+        );
+        assert_eq!(active_aggregate.members[1].relay_id, "relay-b");
+        assert_eq!(active_aggregate.members[1].weight, 3);
+        assert!(loaded.active_relay_uses_protocol_proxy());
+    }
+
+    #[test]
     fn settings_store_update_only_mutates_present_known_fields() {
         let dir = temp_dir();
         let store = SettingsStore::new(dir.join("settings.json"));
         let initial = BackendSettings {
             provider_sync_enabled: false,
-            cli_wrapper_enabled: true,
-            cli_wrapper_base_url: "https://old.test".to_string(),
-            cli_wrapper_api_key: "old-key".to_string(),
-            cli_wrapper_api_key_env: "OLD_ENV".to_string(),
             ..BackendSettings::default()
         };
         store.save(&initial).unwrap();
@@ -1391,16 +1773,16 @@ experimental_bearer_token = "sk-existing""#
             "providerSyncEnabled": true,
             "codexAppPath": "C:\\Portable\\Codex\\Codex.exe",
             "enhancementsEnabled": false,
-            "codexAppPluginEntryUnlock": false,
             "codexAppSessionDelete": false,
             "codexAppConversationView": true,
             "codexAppThreadIdBadge": true,
+            "codexAppNativeMenuLocalization": false,
             "codexAppServiceTierControls": true,
+            "codexAppPetRealMouseLook": true,
             "codexGoalsEnabled": true,
             "relayBaseUrl": "https://relay.example.test/v1",
             "relayApiKey": "sk-relay",
             "codexExtraArgs": ["--force_high_performance_gpu", "", "  ", " --enable-gpu "],
-            "cliWrapperApiKeyEnv": "",
             "unknownKey": "ignored"
             }))
             .unwrap();
@@ -1408,11 +1790,12 @@ experimental_bearer_token = "sk-existing""#
         assert!(updated.provider_sync_enabled);
         assert_eq!(updated.codex_app_path, r"C:\Portable\Codex\Codex.exe");
         assert!(!updated.enhancements_enabled);
-        assert!(!updated.codex_app_plugin_entry_unlock);
         assert!(!updated.codex_app_session_delete);
         assert!(updated.codex_app_conversation_view);
         assert!(updated.codex_app_thread_id_badge);
+        assert!(!updated.codex_app_native_menu_localization);
         assert!(updated.codex_app_service_tier_controls);
+        assert!(updated.codex_app_pet_real_mouse_look);
         assert!(updated.codex_goals_enabled);
         assert_eq!(updated.relay_base_url, "https://relay.example.test/v1");
         assert_eq!(updated.relay_api_key, "sk-relay");
@@ -1423,10 +1806,6 @@ experimental_bearer_token = "sk-existing""#
                 "--enable-gpu".to_string(),
             ]
         );
-        assert!(updated.cli_wrapper_enabled);
-        assert_eq!(updated.cli_wrapper_base_url, "https://old.test");
-        assert_eq!(updated.cli_wrapper_api_key, "old-key");
-        assert_eq!(updated.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
         assert_eq!(store.load().unwrap(), updated);
     }
 
@@ -1439,7 +1818,8 @@ experimental_bearer_token = "sk-existing""#
             .update(json!({
                 "codexAppImageOverlayEnabled": true,
                 "codexAppImageOverlayPath": "C:\\Users\\me\\Pictures\\overlay.png",
-                "codexAppImageOverlayOpacity": 42
+                "codexAppImageOverlayOpacity": 42,
+                "codexAppImageOverlayFitMode": "fill"
             }))
             .unwrap();
 
@@ -1449,6 +1829,60 @@ experimental_bearer_token = "sk-existing""#
             r"C:\Users\me\Pictures\overlay.png"
         );
         assert_eq!(updated.codex_app_image_overlay_opacity, 42);
+        assert_eq!(updated.codex_app_image_overlay_fit_mode, "fill");
+        assert_eq!(store.load().unwrap(), updated);
+    }
+
+    #[test]
+    fn settings_store_defaults_invalid_image_overlay_fit_mode_to_fit() {
+        let dir = temp_dir();
+        let store = SettingsStore::new(dir.join("settings.json"));
+
+        let updated = store
+            .update(json!({
+                "codexAppImageOverlayFitMode": "unknown"
+            }))
+            .unwrap();
+
+        assert_eq!(updated.codex_app_image_overlay_fit_mode, "fit");
+    }
+
+    #[test]
+    fn settings_store_update_persists_stepwise_settings() {
+        let dir = temp_dir();
+        let store = SettingsStore::new(dir.join("settings.json"));
+
+        let updated = store
+            .update(json!({
+                "codexAppStepwiseEnabled": true,
+                "codexAppStepwiseDirectSend": true,
+                "codexAppStepwiseBaseUrl": "https://api.example.test/v1/",
+                "codexAppStepwiseApiKey": " sk-stepwise ",
+                "codexAppStepwiseApiKeyEnv": "",
+                "codexAppStepwiseModel": " stepwise-mini ",
+                "codexAppStepwiseMaxItems": 12,
+                "codexAppStepwiseMaxInputChars": 25000,
+                "codexAppStepwiseMaxOutputTokens": 50,
+                "codexAppStepwiseTimeoutMs": 70000
+            }))
+            .unwrap();
+
+        assert!(updated.codex_app_stepwise_enabled);
+        assert!(updated.codex_app_stepwise_direct_send);
+        assert_eq!(
+            updated.codex_app_stepwise_base_url,
+            "https://api.example.test/v1"
+        );
+        assert_eq!(updated.codex_app_stepwise_api_key, "sk-stepwise");
+        assert_eq!(
+            updated.codex_app_stepwise_api_key_env,
+            default_stepwise_api_key_env()
+        );
+        assert_eq!(updated.codex_app_stepwise_model, "stepwise-mini");
+        assert_eq!(updated.codex_app_stepwise_max_items, 6);
+        assert_eq!(updated.codex_app_stepwise_max_input_chars, 24000);
+        assert_eq!(updated.codex_app_stepwise_max_output_tokens, 100);
+        assert_eq!(updated.codex_app_stepwise_timeout_ms, 60000);
         assert_eq!(store.load().unwrap(), updated);
     }
 
@@ -1589,6 +2023,47 @@ experimental_bearer_token = "sk-existing""#
                 .contains("[plugins.\"superpowers@openai-curated\"]")
         );
         assert_eq!(store.load().unwrap(), updated);
+    }
+
+    #[test]
+    fn settings_store_update_persists_aggregate_relay_profiles_and_active_id() {
+        let dir = temp_dir();
+        let store = SettingsStore::new(dir.join("settings.json"));
+
+        let updated = store
+            .update(json!({
+                "relayProfiles": [
+                    { "id": "relay-a", "name": "中转 A" },
+                    { "id": "relay-b", "name": "中转 B" },
+                    { "id": "agg", "name": "聚合", "relayMode": "aggregate" }
+                ],
+                "activeRelayId": "agg",
+                "aggregateRelayProfiles": [
+                    {
+                        "id": "agg",
+                        "name": "聚合",
+                        "strategy": "weightedRoundRobin",
+                        "members": [
+                            { "relayId": "relay-a", "weight": 1 },
+                            { "relayId": "relay-b", "weight": 4 }
+                        ]
+                    }
+                ],
+                "activeAggregateRelayId": "agg"
+            }))
+            .unwrap();
+
+        let active_aggregate = updated.active_aggregate_relay_profile().unwrap();
+        assert_eq!(updated.active_relay_id, "agg");
+        assert_eq!(updated.active_aggregate_relay_id, "agg");
+        assert_eq!(
+            active_aggregate.strategy,
+            AggregateRelayStrategy::WeightedRoundRobin
+        );
+        assert_eq!(active_aggregate.members.len(), 2);
+        assert_eq!(active_aggregate.members[1].relay_id, "relay-b");
+        assert_eq!(active_aggregate.members[1].weight, 4);
+        assert!(updated.active_relay_uses_protocol_proxy());
     }
 
     #[test]

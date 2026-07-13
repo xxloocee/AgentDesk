@@ -4,6 +4,9 @@ use codex_plus_core::watcher::{
     process_ids_still_running, should_recover_stale_launcher, watcher_disabled_flag,
 };
 
+#[cfg(windows)]
+use codex_plus_core::watcher::{WindowsProcessInfo, find_codex_processes_from_snapshot};
+
 #[test]
 fn cdp_listening_returns_true_for_bound_loopback_port() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -84,6 +87,30 @@ fn codex_process_filter_keeps_only_windowsapps_codex_processes() {
 }
 
 #[test]
+fn codex_process_filter_keeps_chatgpt_desktop_package_processes() {
+    let processes = [
+        (
+            21,
+            r"C:\Program Files\WindowsApps\OpenAI.ChatGPT-Desktop_1.2026.133.0_x64__abc\app\ChatGPT.exe",
+        ),
+        (
+            22,
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.707.3748.0_x64__abc\app\ChatGPT.exe",
+        ),
+        (
+            23,
+            r"C:\Program Files\WindowsApps\OpenAI.ChatGPT-Desktop_1.2026.133.0_x64__abc\app\resources\ChatGPT.exe",
+        ),
+        (
+            24,
+            r"C:\Program Files\WindowsApps\Other.ChatGPT_1.0.0.0_x64__abc\app\ChatGPT.exe",
+        ),
+    ];
+
+    assert_eq!(codex_process_ids(processes), vec![21, 22]);
+}
+
+#[test]
 fn launcher_process_filter_protects_current_process_ancestry() {
     let processes = [
         (10, 0, "codex-plus-plus.exe"),
@@ -110,4 +137,112 @@ fn stop_wait_tracks_only_expected_process_ids() {
         process_ids_still_running(&[10, 20, 30], [5, 20, 40, 30]),
         vec![20, 30]
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_finds_local_install_with_capitial_c() {
+    let processes = [WindowsProcessInfo {
+        process_id: 42,
+        parent_process_id: 0,
+        exe_file: "Codex.exe".to_string(),
+        executable_path: Some(std::path::PathBuf::from(
+            r"D:\360Downloads\codexapp\app\Codex.exe",
+        )),
+    }];
+
+    assert_eq!(find_codex_processes_from_snapshot(&processes), vec![42]);
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_ignores_lowercase_local_cli_binary() {
+    let processes = [WindowsProcessInfo {
+        process_id: 43,
+        parent_process_id: 0,
+        exe_file: "codex.exe".to_string(),
+        executable_path: Some(std::path::PathBuf::from(
+            r"D:\360Downloads\codexapp\app\codex.exe",
+        )),
+    }];
+
+    assert!(find_codex_processes_from_snapshot(&processes).is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_ignores_npm_cli_binary() {
+    let processes = [WindowsProcessInfo {
+        process_id: 44,
+        parent_process_id: 0,
+        exe_file: "codex.exe".to_string(),
+        executable_path: Some(std::path::PathBuf::from(
+            r"C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe",
+        )),
+    }];
+
+    assert!(find_codex_processes_from_snapshot(&processes).is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_ignores_packaged_resource_cli_binary() {
+    let processes = [WindowsProcessInfo {
+        process_id: 45,
+        parent_process_id: 0,
+        exe_file: "codex.exe".to_string(),
+        executable_path: Some(std::path::PathBuf::from(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__abc\app\resources\codex.exe",
+        )),
+    }];
+
+    assert!(find_codex_processes_from_snapshot(&processes).is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_combines_store_and_local_installs() {
+    let processes = [
+        WindowsProcessInfo {
+            process_id: 11,
+            parent_process_id: 0,
+            exe_file: "ChatGPT.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"C:\Program Files\WindowsApps\OpenAI.ChatGPT-Desktop_1.2026.133.0_x64__abc\app\ChatGPT.exe",
+            )),
+        },
+        WindowsProcessInfo {
+            process_id: 42,
+            parent_process_id: 0,
+            exe_file: "Codex.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"D:\360Downloads\codexapp\app\Codex.exe",
+            )),
+        },
+    ];
+
+    assert_eq!(find_codex_processes_from_snapshot(&processes), vec![11, 42]);
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_ignores_unrelated_processes() {
+    let processes = [
+        WindowsProcessInfo {
+            process_id: 10,
+            parent_process_id: 0,
+            exe_file: "notepad.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(r"C:\Windows\notepad.exe")),
+        },
+        WindowsProcessInfo {
+            process_id: 20,
+            parent_process_id: 0,
+            exe_file: "codex-plus-plus.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"D:\Programs\Codex++\codex-plus-plus.exe",
+            )),
+        },
+    ];
+
+    assert!(find_codex_processes_from_snapshot(&processes).is_empty());
 }

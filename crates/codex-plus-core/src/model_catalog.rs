@@ -39,7 +39,15 @@ pub async fn read_codex_model_catalog() -> Value {
     let settings_path = crate::paths::default_settings_path();
     if settings_path.exists() {
         if let Ok(settings) = SettingsStore::new(settings_path).load() {
-            return relay_profile_model_catalog_value(&home, &settings.active_relay_profile());
+            let profile = settings.active_relay_profile();
+            let catalog = relay_profile_model_catalog_value(&home, &profile);
+            if catalog
+                .get("models")
+                .and_then(Value::as_array)
+                .map_or(false, |m| !m.is_empty())
+            {
+                return catalog;
+            }
         }
     }
     let env = std::env::vars().collect::<HashMap<_, _>>();
@@ -66,11 +74,7 @@ pub async fn read_codex_model_catalog() -> Value {
 fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Value {
     let models = relay_profile_model_ids(profile);
     let model = profile.model.trim().to_string();
-    let default_model = if models.iter().any(|item| item == &model) {
-        model.clone()
-    } else {
-        models.first().cloned().unwrap_or_default()
-    };
+    let default_model = models.first().cloned().unwrap_or_default();
     let provider_name = if profile.name.trim().is_empty() {
         profile.id.trim()
     } else {
@@ -102,8 +106,10 @@ fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Val
 
 fn relay_profile_model_ids(profile: &RelayProfile) -> Vec<String> {
     unique_strings(
-        std::iter::once(profile.model.as_str())
-            .chain(profile.model_list.split(['\r', '\n', ',']))
+        profile
+            .model_list
+            .split(['\r', '\n', ','])
+            .chain(std::iter::once(profile.model.as_str()))
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
@@ -564,7 +570,12 @@ fn models_endpoint(base_url: &str) -> String {
     if cleaned.ends_with("/models") {
         return cleaned;
     }
-    if cleaned.ends_with("/v1") {
+    // Only append the default `/v1` version prefix when the base URL does not
+    // already carry a version segment. Providers such as Volcano Engine ARK use
+    // a versioned base (e.g. `.../api/coding/v3`), so blindly appending
+    // `/v1/models` produced `.../api/coding/v3/v1/models` and 404'd. This mirrors
+    // the version handling already used by the protocol proxy. See issue #1349.
+    if crate::protocol_proxy::has_version_suffix(&cleaned) {
         return format!("{cleaned}/models");
     }
     format!("{cleaned}/v1/models")

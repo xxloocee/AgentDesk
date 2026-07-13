@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use codex_plus_core::install::SILENT_BINARY;
 use codex_plus_core::models::{DeleteResult, SessionRef};
+use codex_plus_core::relay_environment::RelayEnvironmentReport;
 use codex_plus_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_plus_core::settings::{BackendSettings, RelayProfile, SettingsStore};
 use codex_plus_core::status::{LaunchStatus, StatusStore};
@@ -56,6 +57,49 @@ pub struct SettingsPayload {
     pub settings: BackendSettings,
     pub settings_path: String,
     pub user_scripts: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketplaceRepairPayload {
+    pub codex_home: String,
+    pub marketplace_root: Option<String>,
+    pub initialized: bool,
+    pub configured: bool,
+    pub needs_repair: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketplaceStatusPayload {
+    pub codex_home: String,
+    pub marketplace_root: Option<String>,
+    pub config_registered: bool,
+    pub needs_repair: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePluginMarketplacePayload {
+    pub codex_home: String,
+    pub marketplace_root: Option<String>,
+    pub config_registered: bool,
+    pub needs_repair: bool,
+    pub plugin_count: usize,
+    pub skill_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcsProvidersPayload {
+    pub db_path: String,
+    pub providers: Vec<codex_plus_core::ccs_import::CcsProviderImport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingProviderImportPayload {
+    pub pending: Option<codex_plus_core::provider_import::ProviderImportRequest>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,9 +200,42 @@ pub struct RelayProfileTestPayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RelayLatencyPayload {
+    pub latency_ms: Option<u64>,
+    pub http_status: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepwiseTestPayload {
+    pub item_count: usize,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RelayProfileModelsPayload {
     pub models: Vec<String>,
     pub endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDoctorCheck {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDoctorPayload {
+    pub profile_name: String,
+    pub model: String,
+    pub summary: String,
+    pub recommendation: String,
+    pub checks: Vec<ProviderDoctorCheck>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -431,13 +508,7 @@ pub fn load_settings() -> CommandResult<SettingsPayload> {
 pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload> {
     let settings = normalize_settings_before_save(settings);
     match SettingsStore::default().save(&settings) {
-        Ok(()) => {
-            let wrapper_message = refresh_cli_wrapper_after_settings_save(&settings);
-            settings_payload(
-                &format!("设置已保存。{wrapper_message}"),
-                "设置保存后重新读取失败",
-            )
-        }
+        Ok(()) => settings_payload("设置已保存。", "设置保存后重新读取失败"),
         Err(error) => failed(
             &format!("保存设置失败：{error}"),
             SettingsPayload {
@@ -447,6 +518,130 @@ pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload
                     .to_string(),
                 user_scripts: user_script_inventory(),
             },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn load_ccs_providers() -> CommandResult<CcsProvidersPayload> {
+    let db_path = codex_plus_core::ccs_import::default_ccs_db_path();
+    match codex_plus_core::ccs_import::list_codex_providers_from_db(&db_path) {
+        Ok(providers) => ok(
+            &format!(
+                "已读取 cc-switch Codex 供应商配置：{} 个。",
+                providers.len()
+            ),
+            CcsProvidersPayload {
+                db_path: db_path.to_string_lossy().to_string(),
+                providers,
+            },
+        ),
+        Err(error) => failed(
+            &format!("读取 cc-switch 供应商配置失败：{error}"),
+            CcsProvidersPayload {
+                db_path: db_path.to_string_lossy().to_string(),
+                providers: Vec::new(),
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn import_ccs_providers() -> CommandResult<SettingsPayload> {
+    let providers = match codex_plus_core::ccs_import::list_codex_providers_from_default_db() {
+        Ok(providers) => providers,
+        Err(error) => {
+            let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
+            return failed(&format!("读取 cc-switch 供应商配置失败：{error}"), payload);
+        }
+    };
+
+    let store = SettingsStore::default();
+    let mut settings = store.load().unwrap_or_default();
+    let mut existing_keys: Vec<String> = settings
+        .relay_profiles
+        .iter()
+        .map(codex_plus_core::ccs_import::imported_provider_identity)
+        .collect();
+    let mut existing_ids: Vec<String> = settings
+        .relay_profiles
+        .iter()
+        .map(|profile| profile.id.clone())
+        .collect();
+    let mut imported = 0usize;
+
+    for provider in providers {
+        let key = codex_plus_core::ccs_import::provider_identity_from_ccs(&provider);
+        if existing_keys.iter().any(|existing| existing == &key) {
+            continue;
+        }
+        let profile = codex_plus_core::ccs_import::relay_profile_from_ccs(&provider, &existing_ids);
+        existing_ids.push(profile.id.clone());
+        existing_keys.push(key);
+        settings.relay_profiles.push(profile);
+        imported += 1;
+    }
+
+    if imported == 0 {
+        return settings_payload("没有新的 cc-switch 供应商配置需要导入。", "设置读取失败");
+    }
+
+    settings = normalize_settings_before_save(settings);
+    match store.save(&settings) {
+        Ok(()) => settings_payload(
+            &format!("已从 cc-switch 导入供应商配置：{imported} 个。"),
+            "导入供应商配置后重新读取设置失败",
+        ),
+        Err(error) => failed(
+            &format!("保存 cc-switch 供应商配置失败：{error}"),
+            settings_payload_value().unwrap_or_else(|(_, payload)| payload),
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn load_pending_provider_import() -> CommandResult<PendingProviderImportPayload> {
+    match codex_plus_core::provider_import::load_pending_provider_import() {
+        Ok(pending) => ok(
+            "待确认供应商导入已读取。",
+            PendingProviderImportPayload { pending },
+        ),
+        Err(error) => failed(
+            &format!("读取待确认供应商导入失败：{error}"),
+            PendingProviderImportPayload { pending: None },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn confirm_pending_provider_import() -> CommandResult<SettingsPayload> {
+    match codex_plus_core::provider_import::confirm_pending_provider_import() {
+        Ok(Some(result)) => {
+            let message = if result.imported {
+                format!("已导入供应商配置：{}。", result.profile_name)
+            } else {
+                format!("供应商配置已存在：{}。", result.profile_name)
+            };
+            settings_payload(&message, "供应商导入后重新读取设置失败")
+        }
+        Ok(None) => settings_payload("没有待确认的供应商导入。", "设置读取失败"),
+        Err(error) => failed(
+            &format!("导入供应商配置失败：{error}"),
+            settings_payload_value().unwrap_or_else(|(_, payload)| payload),
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn dismiss_pending_provider_import() -> CommandResult<PendingProviderImportPayload> {
+    match codex_plus_core::provider_import::clear_pending_provider_import() {
+        Ok(()) => ok(
+            "已取消供应商导入。",
+            PendingProviderImportPayload { pending: None },
+        ),
+        Err(error) => failed(
+            &format!("取消供应商导入失败：{error}"),
+            PendingProviderImportPayload { pending: None },
         ),
     }
 }
@@ -797,10 +992,14 @@ fn strip_common_config_text_fallback(config_contents: &str, common_config: &str)
 
     let mut kept = Vec::new();
     let mut skipping_table = false;
+    let mut in_root_section = true;
+    let mut removed_root_keys = std::collections::HashSet::new();
+    let source_root_keys = toml_root_keys_before_first_table(config_contents);
 
     for line in config_contents.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_root_section = false;
             let header = trimmed.to_string();
             skipping_table = common.table_headers.contains(&header);
             if skipping_table {
@@ -812,9 +1011,21 @@ fn strip_common_config_text_fallback(config_contents: &str, common_config: &str)
             continue;
         }
 
-        if let Some(key) = toml_key_from_line(trimmed) {
+        if in_root_section && let Some(key) = toml_key_from_line(trimmed) {
             if common.root_keys.contains(key) {
-                continue;
+                let is_duplicate_common_key = removed_root_keys.contains(key)
+                    || source_root_keys.contains(key)
+                    || common.table_headers.contains("[features]")
+                    || common
+                        .table_headers
+                        .contains("[marketplaces.openai-bundled]")
+                    || common
+                        .table_headers
+                        .contains("[plugins.\"superpowers@openai-curated\"]");
+                if is_duplicate_common_key {
+                    removed_root_keys.insert(key.to_string());
+                    continue;
+                }
             }
         }
 
@@ -822,6 +1033,20 @@ fn strip_common_config_text_fallback(config_contents: &str, common_config: &str)
     }
 
     ensure_text_newline(kept.join("\n").trim_end())
+}
+
+fn toml_root_keys_before_first_table(config_contents: &str) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for line in config_contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            break;
+        }
+        if let Some(key) = toml_key_from_line(trimmed) {
+            keys.insert(key.to_string());
+        }
+    }
+    keys
 }
 
 struct CommonConfigAnchors {
@@ -1158,17 +1383,194 @@ pub async fn repair_shortcuts() -> InstallActionResult {
 }
 
 #[tauri::command]
-pub fn repair_backend() -> CommandResult<SettingsPayload> {
-    let settings = SettingsStore::default().load().unwrap_or_default();
-    let message = match codex_plus_core::cli_wrapper::ensure_cli_wrapper(&settings) {
-        Ok(Some(install)) => format!(
-            "后端已修复，命令包装器已指向 {}。",
-            install.real_codex.to_string_lossy()
+pub fn plugin_marketplace_status() -> CommandResult<PluginMarketplaceStatusPayload> {
+    let home = codex_plus_core::codex_home::default_codex_home_dir();
+    let status = codex_plus_core::plugin_marketplace::openai_curated_marketplace_status(&home);
+    ok(
+        if status.needs_repair() {
+            "插件市场需要初始化或注册。"
+        } else {
+            "插件市场已可用。"
+        },
+        PluginMarketplaceStatusPayload {
+            codex_home: home.to_string_lossy().to_string(),
+            marketplace_root: status
+                .marketplace_root
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            config_registered: status.config_registered,
+            needs_repair: status.needs_repair(),
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn repair_plugin_marketplace() -> CommandResult<PluginMarketplaceRepairPayload> {
+    let home = codex_plus_core::codex_home::default_codex_home_dir();
+    match codex_plus_core::plugin_marketplace::initialize_openai_curated_marketplace_and_configure(
+        &home,
+    )
+    .await
+    {
+        Ok(result) => ok(
+            if result.initialized {
+                "插件市场已从 openai/plugins 初始化并注册。"
+            } else if result.configured {
+                "已注册本地插件市场。"
+            } else {
+                "插件市场已可用，无需修复。"
+            },
+            PluginMarketplaceRepairPayload {
+                codex_home: home.to_string_lossy().to_string(),
+                marketplace_root:
+                    codex_plus_core::plugin_marketplace::openai_curated_marketplace_status(&home)
+                        .marketplace_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                initialized: result.initialized,
+                configured: result.configured,
+                needs_repair: false,
+            },
         ),
-        Ok(None) => "后端已修复，命令包装器当前未启用。".to_string(),
-        Err(error) => format!("后端修复部分失败：{error}"),
+        Err(error) => failed(
+            &format!("插件市场修复失败：{error}"),
+            PluginMarketplaceRepairPayload {
+                codex_home: home.to_string_lossy().to_string(),
+                marketplace_root:
+                    codex_plus_core::plugin_marketplace::openai_curated_marketplace_status(&home)
+                        .marketplace_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                initialized: false,
+                configured: false,
+                needs_repair: true,
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn remote_plugin_marketplace_status() -> CommandResult<RemotePluginMarketplacePayload> {
+    let home = codex_plus_core::codex_home::default_codex_home_dir();
+    let status =
+        codex_plus_core::plugin_marketplace::openai_curated_remote_marketplace_status(&home);
+    let (plugin_count, skill_count) =
+        remote_plugin_marketplace_counts(status.marketplace_root.as_deref());
+    ok(
+        if status.needs_repair() {
+            "官方远端插件缓存需要释放或注册。"
+        } else {
+            "官方远端插件缓存已可用。"
+        },
+        RemotePluginMarketplacePayload {
+            codex_home: home.to_string_lossy().to_string(),
+            marketplace_root: status
+                .marketplace_root
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            config_registered: status.config_registered,
+            needs_repair: status.needs_repair(),
+            plugin_count,
+            skill_count,
+        },
+    )
+}
+
+#[tauri::command]
+pub fn repair_remote_plugin_marketplace() -> CommandResult<RemotePluginMarketplacePayload> {
+    let home = codex_plus_core::codex_home::default_codex_home_dir();
+    match codex_plus_core::plugin_marketplace::ensure_openai_curated_remote_marketplace_available(
+        &home,
+    ) {
+        Ok(result) => {
+            let status =
+                codex_plus_core::plugin_marketplace::openai_curated_remote_marketplace_status(
+                    &home,
+                );
+            let (plugin_count, skill_count) =
+                remote_plugin_marketplace_counts(status.marketplace_root.as_deref());
+            ok(
+                if result.initialized {
+                    "已释放并注册内置官方远端插件缓存。"
+                } else if result.configured {
+                    "已注册官方远端插件缓存。"
+                } else {
+                    "官方远端插件缓存已可用，无需修复。"
+                },
+                RemotePluginMarketplacePayload {
+                    codex_home: home.to_string_lossy().to_string(),
+                    marketplace_root: status
+                        .marketplace_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                    config_registered: status.config_registered,
+                    needs_repair: status.needs_repair(),
+                    plugin_count,
+                    skill_count,
+                },
+            )
+        }
+        Err(error) => {
+            let status =
+                codex_plus_core::plugin_marketplace::openai_curated_remote_marketplace_status(
+                    &home,
+                );
+            let (plugin_count, skill_count) =
+                remote_plugin_marketplace_counts(status.marketplace_root.as_deref());
+            failed(
+                &format!("官方远端插件缓存修复失败：{error}"),
+                RemotePluginMarketplacePayload {
+                    codex_home: home.to_string_lossy().to_string(),
+                    marketplace_root: status
+                        .marketplace_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                    config_registered: status.config_registered,
+                    needs_repair: status.needs_repair(),
+                    plugin_count,
+                    skill_count,
+                },
+            )
+        }
+    }
+}
+
+fn remote_plugin_marketplace_counts(root: Option<&Path>) -> (usize, usize) {
+    let Some(root) = root else {
+        return (0, 0);
     };
-    settings_payload(&message, "修复后重新读取设置失败")
+    let marketplace_path = root
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
+    let plugin_count = std::fs::read_to_string(&marketplace_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|marketplace| {
+            marketplace
+                .get("plugins")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+        .unwrap_or(0);
+    let skill_count = count_skill_files(&root.join("plugins")).unwrap_or(0);
+    (plugin_count, skill_count)
+}
+
+fn count_skill_files(root: &Path) -> std::io::Result<usize> {
+    if !root.is_dir() {
+        return Ok(0);
+    }
+    let mut total = 0;
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            total += count_skill_files(&path)?;
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+            total += 1;
+        }
+    }
+    Ok(total)
 }
 
 #[tauri::command]
@@ -1349,6 +1751,7 @@ pub fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
     settings.codex_app_image_overlay_enabled = defaults.codex_app_image_overlay_enabled;
     settings.codex_app_image_overlay_path = defaults.codex_app_image_overlay_path;
     settings.codex_app_image_overlay_opacity = defaults.codex_app_image_overlay_opacity;
+    settings.codex_app_image_overlay_fit_mode = defaults.codex_app_image_overlay_fit_mode;
     let settings = normalize_settings_before_save(settings);
     match store.save(&settings) {
         Ok(()) => settings_payload("图片覆盖层设置已重置。", "图片覆盖层重置后重新读取失败"),
@@ -1402,6 +1805,17 @@ pub fn check_env_conflicts() -> CommandResult<EnvConflictsPayload> {
         "检测到可能覆盖 Codex 供应商配置的 OPENAI 环境变量。"
     };
     ok(message, EnvConflictsPayload { conflicts })
+}
+
+#[tauri::command]
+pub fn check_relay_environment() -> CommandResult<RelayEnvironmentReport> {
+    let report = codex_plus_core::relay_environment::inspect_relay_environment();
+    let message = if report.all_passed() {
+        "中转站环境配置检测全部通过。"
+    } else {
+        "检测到可能影响中转站配置的环境问题。"
+    };
+    ok(message, report)
 }
 
 #[tauri::command]
@@ -1835,6 +2249,64 @@ pub async fn test_relay_profile(profile: RelayProfile) -> CommandResult<RelayPro
 }
 
 #[tauri::command]
+pub async fn measure_relay_latency(url: String) -> CommandResult<RelayLatencyPayload> {
+    match codex_plus_core::relay_latency::measure_relay_latency(&url).await {
+        Ok(measurement) => ok(
+            "目标 URL 延迟检测完成。",
+            RelayLatencyPayload {
+                latency_ms: Some(measurement.latency_ms),
+                http_status: Some(measurement.http_status),
+            },
+        ),
+        Err(error) => failed(
+            &format!("目标 URL 延迟检测失败：{error}"),
+            RelayLatencyPayload {
+                latency_ms: None,
+                http_status: None,
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn test_stepwise_settings(
+    settings: BackendSettings,
+) -> CommandResult<StepwiseTestPayload> {
+    match codex_plus_core::stepwise::test_connection(&settings).await {
+        Ok(result) => {
+            let error = result
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let item_count = result
+                .get("items")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or_default();
+            if error.is_empty() {
+                ok(
+                    &format!("Stepwise 连接正常，测试返回 {item_count} 条建议。"),
+                    StepwiseTestPayload { item_count, error },
+                )
+            } else {
+                failed(
+                    &format!("Stepwise 测试失败：{error}"),
+                    StepwiseTestPayload { item_count, error },
+                )
+            }
+        }
+        Err(error) => failed(
+            &format!("Stepwise 测试失败：{error}"),
+            StepwiseTestPayload {
+                item_count: 0,
+                error: error.to_string(),
+            },
+        ),
+    }
+}
+
+#[tauri::command]
 pub async fn fetch_relay_profile_models(
     profile: RelayProfile,
 ) -> CommandResult<RelayProfileModelsPayload> {
@@ -1859,6 +2331,216 @@ pub async fn fetch_relay_profile_models(
 }
 
 #[tauri::command]
+pub async fn diagnose_relay_profile(profile: RelayProfile) -> CommandResult<ProviderDoctorPayload> {
+    let profile_name = if profile.name.trim().is_empty() {
+        "未命名供应商".to_string()
+    } else {
+        profile.name.trim().to_string()
+    };
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let test_model = if !profile.test_model.trim().is_empty() {
+        profile.test_model.trim().to_string()
+    } else {
+        let from_profile = codex_plus_core::relay_config::relay_profile_model(&profile);
+        if from_profile.trim().is_empty() {
+            settings.relay_test_model.trim().to_string()
+        } else {
+            from_profile
+        }
+    };
+    let mut checks = Vec::new();
+
+    if profile.relay_mode == codex_plus_core::settings::RelayMode::Official
+        && !profile.official_mix_api_key
+    {
+        checks.push(ProviderDoctorCheck {
+            id: "config".to_string(),
+            title: "配置完整性".to_string(),
+            status: "ok".to_string(),
+            detail: "官方登录供应商不需要 Base URL / API Key。".to_string(),
+        });
+        let payload = ProviderDoctorPayload {
+            profile_name,
+            model: test_model,
+            summary: "官方登录供应商无需 API 诊断。".to_string(),
+            recommendation: "如果 Codex 官方账号可用，直接使用官方登录模式即可。".to_string(),
+            checks,
+        };
+        return ok("Provider Doctor：官方登录供应商无需 API 诊断。", payload);
+    }
+
+    if codex_plus_core::relay_config::relay_profile_base_url(&profile)
+        .trim()
+        .is_empty()
+        || codex_plus_core::relay_config::relay_profile_api_key(&profile)
+            .trim()
+            .is_empty()
+    {
+        checks.push(ProviderDoctorCheck {
+            id: "config".to_string(),
+            title: "配置完整性".to_string(),
+            status: "failed".to_string(),
+            detail: "Base URL 或 API Key 为空。".to_string(),
+        });
+        let payload = ProviderDoctorPayload {
+            profile_name,
+            model: test_model,
+            summary: "配置不完整，无法发起上游诊断。".to_string(),
+            recommendation: "先填写 Base URL 和 API Key；如果是官方账号，请切换到官方登录模式。"
+                .to_string(),
+            checks,
+        };
+        return failed("Provider Doctor：配置不完整。", payload);
+    }
+
+    checks.push(ProviderDoctorCheck {
+        id: "config".to_string(),
+        title: "配置完整性".to_string(),
+        status: "ok".to_string(),
+        detail: format!(
+            "{} / {}",
+            codex_plus_core::relay_config::relay_profile_base_url(&profile),
+            match profile.protocol {
+                codex_plus_core::settings::RelayProtocol::Responses => "Responses API",
+                codex_plus_core::settings::RelayProtocol::ChatCompletions => "Chat Completions",
+            }
+        ),
+    });
+
+    match codex_plus_core::model_catalog::fetch_relay_profile_model_ids(&profile).await {
+        Ok((models, endpoint)) => {
+            let contains_model = !test_model.trim().is_empty()
+                && models.iter().any(|model| model == test_model.trim());
+            let status = if models.is_empty() {
+                "failed"
+            } else if contains_model || test_model.trim().is_empty() {
+                "ok"
+            } else {
+                "warning"
+            };
+            let detail = if models.is_empty() {
+                format!("{endpoint} 返回 0 个模型。")
+            } else if contains_model || test_model.trim().is_empty() {
+                format!("{endpoint} 返回 {} 个模型。", models.len())
+            } else {
+                format!(
+                    "{endpoint} 返回 {} 个模型，但未看到测试模型「{}」。",
+                    models.len(),
+                    test_model
+                )
+            };
+            checks.push(ProviderDoctorCheck {
+                id: "models".to_string(),
+                title: "模型列表".to_string(),
+                status: status.to_string(),
+                detail,
+            });
+        }
+        Err(error) => checks.push(ProviderDoctorCheck {
+            id: "models".to_string(),
+            title: "模型列表".to_string(),
+            status: "failed".to_string(),
+            detail: error.to_string(),
+        }),
+    }
+
+    match codex_plus_core::relay_config::test_relay_profile(&profile, &test_model).await {
+        Ok(result) => {
+            let status = if result.http_status < 400 {
+                "ok"
+            } else {
+                "failed"
+            };
+            let preview = result.response_preview.trim();
+            checks.push(ProviderDoctorCheck {
+                id: "request".to_string(),
+                title: "真实请求".to_string(),
+                status: status.to_string(),
+                detail: if preview.is_empty() {
+                    format!(
+                        "{} 返回 HTTP {}，响应内容为空。",
+                        result.endpoint, result.http_status
+                    )
+                } else {
+                    format!(
+                        "{} 返回 HTTP {}：{}",
+                        result.endpoint, result.http_status, preview
+                    )
+                },
+            });
+        }
+        Err(error) => checks.push(ProviderDoctorCheck {
+            id: "request".to_string(),
+            title: "真实请求".to_string(),
+            status: "failed".to_string(),
+            detail: error.to_string(),
+        }),
+    }
+
+    let failed_count = checks
+        .iter()
+        .filter(|check| check.status == "failed")
+        .count();
+    let warning_count = checks
+        .iter()
+        .filter(|check| check.status == "warning")
+        .count();
+    let status = if failed_count > 0 {
+        "failed"
+    } else if warning_count > 0 {
+        "ok"
+    } else {
+        "ok"
+    };
+    let summary = if failed_count > 0 {
+        format!("发现 {failed_count} 项失败，Codex 可能无法使用该供应商。")
+    } else if warning_count > 0 {
+        format!("基础连接可用，但有 {warning_count} 项需要确认。")
+    } else {
+        "供应商基础诊断通过。".to_string()
+    };
+    let recommendation = provider_doctor_recommendation(&checks);
+    let message = format!("Provider Doctor：{summary}");
+    CommandResult {
+        status: status.to_string(),
+        message,
+        payload: ProviderDoctorPayload {
+            profile_name,
+            model: test_model,
+            summary,
+            recommendation,
+            checks,
+        },
+    }
+}
+
+fn provider_doctor_recommendation(checks: &[ProviderDoctorCheck]) -> String {
+    if checks
+        .iter()
+        .any(|check| check.id == "config" && check.status == "failed")
+    {
+        return "先补齐 Base URL 和 API Key；如果使用官方账号，请切换到官方登录模式。".to_string();
+    }
+    if checks
+        .iter()
+        .any(|check| check.id == "models" && check.status == "failed")
+    {
+        return "优先检查 Base URL 是否包含正确的 /v1 前缀，以及供应商是否支持 /v1/models。"
+            .to_string();
+    }
+    if checks
+        .iter()
+        .any(|check| check.id == "request" && check.status == "failed")
+    {
+        return "优先检查测试模型名称、上游协议选择和 Key 权限；如果 Chat Completions 可用，请切到对应协议。".to_string();
+    }
+    if checks.iter().any(|check| check.status == "warning") {
+        return "连接可用，但测试模型没有出现在模型列表里；建议改用上游返回的模型名。".to_string();
+    }
+    "可以作为 Codex 供应商使用；如果真实对话仍失败，请查看协议代理日志里的上游响应。".to_string()
+}
+
+#[tauri::command]
 pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
     let settings = SettingsStore::default().load().unwrap_or_default();
@@ -1871,6 +2553,9 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
     }
     let relay = settings.active_relay_profile();
     log_relay_apply_request("manager.apply_relay_injection", &settings, &relay);
+    if settings.active_aggregate_relay_profile().is_some() {
+        return apply_aggregate_relay_injection_to_home(&home);
+    }
     if relay_has_complete_files(&relay) {
         return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
             &home,
@@ -1957,6 +2642,33 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
             );
             failed(
                 &format!("写入中转配置失败：{error}"),
+                relay_payload(status, None),
+            )
+        }
+    }
+}
+
+fn apply_aggregate_relay_injection_to_home(home: &Path) -> CommandResult<RelayPayload> {
+    match codex_plus_core::relay_config::apply_relay_config_to_home_with_protocol(
+        home,
+        &codex_plus_core::protocol_proxy::local_responses_proxy_base_url(
+            codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        ),
+        "codex-plus-aggregate",
+        codex_plus_core::settings::RelayProtocol::Responses,
+        codex_plus_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+    ) {
+        Ok(result) => {
+            let status = codex_plus_core::relay_config::relay_status_from_home(home);
+            ok(
+                "聚合供应商配置已写入，真实请求会由本地代理按策略轮转。",
+                relay_payload(status, result.backup_path),
+            )
+        }
+        Err(error) => {
+            let status = codex_plus_core::relay_config::relay_status_from_home(home);
+            failed(
+                &format!("写入聚合供应商配置失败：{error}"),
                 relay_payload(status, None),
             )
         }
@@ -2183,17 +2895,6 @@ fn sanitize_manager_event(event: &str) -> String {
         suffix.to_string()
     } else {
         format!("manager.ui.{suffix}")
-    }
-}
-
-fn refresh_cli_wrapper_after_settings_save(settings: &BackendSettings) -> String {
-    match codex_plus_core::cli_wrapper::ensure_cli_wrapper(settings) {
-        Ok(Some(install)) => format!(
-            " 命令包装器已更新：{}。",
-            install.real_codex.to_string_lossy()
-        ),
-        Ok(None) => String::new(),
-        Err(error) => format!(" 但命令包装器更新失败：{error}。"),
     }
 }
 
@@ -2714,6 +3415,66 @@ mod tests {
     }
 
     #[test]
+    fn provider_doctor_recommendation_prioritizes_actionable_failures() {
+        let recommendation = provider_doctor_recommendation(&[
+            ProviderDoctorCheck {
+                id: "models".to_string(),
+                title: "模型列表".to_string(),
+                status: "failed".to_string(),
+                detail: "上游不支持 /v1/models".to_string(),
+            },
+            ProviderDoctorCheck {
+                id: "request".to_string(),
+                title: "真实请求".to_string(),
+                status: "failed".to_string(),
+                detail: "HTTP 404".to_string(),
+            },
+        ]);
+
+        assert!(recommendation.contains("/v1/models"));
+    }
+
+    #[test]
+    fn provider_doctor_recommendation_reports_model_warning() {
+        let recommendation = provider_doctor_recommendation(&[
+            ProviderDoctorCheck {
+                id: "config".to_string(),
+                title: "配置完整性".to_string(),
+                status: "ok".to_string(),
+                detail: "https://example.test/v1 / Responses API".to_string(),
+            },
+            ProviderDoctorCheck {
+                id: "models".to_string(),
+                title: "模型列表".to_string(),
+                status: "warning".to_string(),
+                detail: "未看到测试模型".to_string(),
+            },
+            ProviderDoctorCheck {
+                id: "request".to_string(),
+                title: "真实请求".to_string(),
+                status: "ok".to_string(),
+                detail: "HTTP 200".to_string(),
+            },
+        ]);
+
+        assert!(recommendation.contains("测试模型"));
+    }
+
+    #[test]
+    fn aggregate_relay_injection_writes_local_proxy_without_chatgpt_auth() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let result = apply_aggregate_relay_injection_to_home(temp.path());
+        let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+
+        assert_eq!(result.status, "ok");
+        assert!(result.payload.configured);
+        assert!(!result.payload.authenticated);
+        assert!(config.contains(r#"base_url = "http://127.0.0.1:57321/v1""#));
+        assert!(config.contains(r#"experimental_bearer_token = "codex-plus-aggregate""#));
+    }
+
+    #[test]
     fn relay_files_payload_reads_config_and_auth_contents() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2988,7 +3749,6 @@ mod tests {
             relay_common_config_contents: "[mcp_servers.context7]\ncommand = \"npx\"\n".to_string(),
             relay_profiles: vec![RelayProfile {
                 use_common_config: false,
-                relay_mode: codex_plus_core::settings::RelayMode::PureApi,
                 config_contents: "model = \"gpt-5\"\n\n[mcp_servers.context7]\ncommand = \"npx\"\n"
                     .to_string(),
                 ..RelayProfile::default()
@@ -3021,6 +3781,27 @@ mod tests {
     }
 
     #[test]
+    fn normalize_settings_before_save_preserves_manual_relay_mode_for_pure_api_profile() {
+        let settings = BackendSettings {
+            active_relay_id: "api".to_string(),
+            launch_mode: codex_plus_core::settings::LaunchMode::Relay,
+            relay_profiles: vec![RelayProfile {
+                id: "api".to_string(),
+                relay_mode: codex_plus_core::settings::RelayMode::PureApi,
+                ..RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+
+        let normalized = normalize_settings_before_save(settings);
+
+        assert_eq!(
+            normalized.launch_mode,
+            codex_plus_core::settings::LaunchMode::Relay
+        );
+    }
+
+    #[test]
     fn reset_image_overlay_settings_preserves_supplier_settings() {
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
@@ -3030,6 +3811,7 @@ mod tests {
             codex_app_image_overlay_enabled: true,
             codex_app_image_overlay_path: "C:\\Users\\me\\Pictures\\overlay.png".to_string(),
             codex_app_image_overlay_opacity: 42,
+            codex_app_image_overlay_fit_mode: "fill".to_string(),
             active_relay_id: "supplier-a".to_string(),
             relay_profiles: vec![RelayProfile {
                 id: "supplier-a".to_string(),
@@ -3049,6 +3831,10 @@ mod tests {
         assert!(!result.payload.settings.codex_app_image_overlay_enabled);
         assert_eq!(result.payload.settings.codex_app_image_overlay_path, "");
         assert_eq!(result.payload.settings.codex_app_image_overlay_opacity, 35);
+        assert_eq!(
+            result.payload.settings.codex_app_image_overlay_fit_mode,
+            "fit"
+        );
         assert_eq!(result.payload.settings.active_relay_id, "supplier-a");
         assert_eq!(result.payload.settings.relay_profiles.len(), 1);
         assert_eq!(result.payload.settings.relay_profiles[0].id, "supplier-a");
@@ -3071,10 +3857,16 @@ mod tests {
 
         let normalized = normalize_settings_before_save(settings);
 
+        let auth_json: serde_json::Value =
+            serde_json::from_str(&normalized.relay_profiles[0].auth_contents).unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&normalized.relay_profiles[0].auth_contents)
-                .unwrap(),
-            serde_json::json!({"auth_mode":"chatgpt","tokens":{"access_token":"edited"}})
+            auth_json,
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "edited"
+                }
+            })
         );
         assert!(normalized.relay_profiles[0].config_contents.is_empty());
     }
@@ -3093,7 +3885,6 @@ enabled = true
             .to_string(),
             relay_profiles: vec![RelayProfile {
                 use_common_config: true,
-                relay_mode: codex_plus_core::settings::RelayMode::PureApi,
                 config_contents: r#"model = "gpt-5"
 model_reasoning_effort = "high"
 
@@ -3130,7 +3921,6 @@ last_updated = "2026-05-25T11:52:46Z"
             .to_string(),
             relay_profiles: vec![RelayProfile {
                 use_common_config: true,
-                relay_mode: codex_plus_core::settings::RelayMode::PureApi,
                 config_contents: r#"model = "gpt-5"
 model_reasoning_effort = "high"
 

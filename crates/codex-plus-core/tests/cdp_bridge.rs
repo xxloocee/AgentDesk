@@ -2,7 +2,8 @@ use base64::Engine;
 use codex_plus_core::assets;
 use codex_plus_core::bridge::{self, BRIDGE_BINDING_NAME};
 use codex_plus_core::cdp::{
-    CdpTarget, list_targets, pick_injectable_codex_page_target, pick_page_target,
+    CdpTarget, is_avatar_overlay_page_target, is_primary_codex_page_target, list_targets,
+    pick_injectable_codex_page_target, pick_page_target,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -54,6 +55,72 @@ fn injection_script_prefixes_helper_url_and_sponsor_images() {
 }
 
 #[test]
+fn pet_real_mouse_settings_are_gated_to_windows_in_injected_ui() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("codexPlusIsWindowsPlatform"));
+    assert!(script.contains(r#"/\bWindows\b/i.test(navigator.userAgent || "")"#));
+    assert!(script.contains("codexPlusIsWindowsPlatform ? `<div"));
+}
+
+#[test]
+fn pet_real_mouse_script_uses_cdp_push_and_native_avatar_event() {
+    let script = assets::pet_real_mouse_script();
+
+    assert!(script.contains("avatar-overlay-computer-use-cursor-changed"));
+    assert!(script.contains("data-avatar-mascot"));
+    assert!(script.contains("nativeCursorActive"));
+    assert!(script.contains("transport: \"cdp-push\""));
+    assert!(script.contains("updateScreenPoint(point)"));
+    assert!(script.contains("mascot.matches(\":hover\")"));
+    assert!(script.contains("document.elementFromPoint(localPoint.x, localPoint.y)"));
+    assert!(script.contains("if (mascotHovered)"));
+    assert!(
+        script
+            .contains("document.visibilityState !== \"visible\" || dragging || nativeCursorActive")
+    );
+    assert!(script.contains("sendPoint(null).catch(disableUpdates)"));
+    assert!(script.contains("void cleared.catch(disableUpdates)"));
+    assert!(script.contains("dispatcher.dispatchHostMessage({ type: eventType, point: null })"));
+    assert!(script.contains("movementHoldMs = 1400"));
+    assert!(script.contains("activationRadius = 480"));
+    assert!(!script.contains("/pet/cursor-position"));
+    assert!(!script.contains("X-Codex-Plus-Pet-Token"));
+    assert!(script.contains("delete window.__codexPlusPetRealMouseLook"));
+}
+
+#[test]
+fn pet_real_mouse_capability_probe_rejects_v1_without_explicit_v2_evidence() {
+    let probe = assets::pet_real_mouse_capability_probe_script();
+
+    assert!(probe.contains("data-avatar-mascot"));
+    assert!(probe.contains("image.naturalWidth === 1536"));
+    assert!(probe.contains("image.naturalHeight === 2288"));
+    assert!(!probe.contains("new Image()"));
+    assert!(probe.contains("if (!currentSpriteIsV2) return false"));
+    assert!(!probe.contains("spriteVersionNumber"));
+    assert!(probe.contains("dispatchHostMessage"));
+    assert!(probe.contains("typeof value.subscribe === \"function\""));
+    assert!(!probe.contains("__codexPlusPetRealMouseLook"));
+    assert!(!probe.contains("runtimeVersion"));
+}
+
+#[test]
+fn pet_real_mouse_update_script_stops_when_runtime_capability_is_missing() {
+    let script = assets::pet_real_mouse_update_script(-125, 640);
+
+    assert!(script.contains("data-avatar-mascot"));
+    assert!(script.contains("image.naturalWidth === 1536"));
+    assert!(script.contains("image.naturalHeight === 2288"));
+    assert!(script.contains("updateScreenPoint?.({ x: -125, y: 640 }) === true"));
+}
+
+#[test]
+fn pet_real_mouse_stop_script_retires_existing_runtime() {
+    assert!(assets::pet_real_mouse_stop_script().contains("__codexPlusPetRealMouseLook?.stop?.()"));
+}
+
+#[test]
 fn injection_script_exposes_image_overlay_config() {
     let temp = tempfile::tempdir().unwrap();
     let image_path = temp.path().join("overlay.png");
@@ -68,6 +135,7 @@ fn injection_script_exposes_image_overlay_config() {
         codex_app_image_overlay_enabled: true,
         codex_app_image_overlay_path: image_path.to_string_lossy().to_string(),
         codex_app_image_overlay_opacity: 42,
+        codex_app_image_overlay_fit_mode: "fill".to_string(),
         ..Default::default()
     };
     let script = assets::injection_script_with_settings(57321, &settings);
@@ -75,6 +143,7 @@ fn injection_script_exposes_image_overlay_config() {
     assert!(script.contains("window.__CODEX_PLUS_IMAGE_OVERLAY__"));
     assert!(script.contains("\"enabled\":true"));
     assert!(script.contains("\"opacity\":0.42"));
+    assert!(script.contains("\"fitMode\":\"fill\""));
     assert!(script.contains("\"dataUrl\":\"data:image/png;base64,"));
     assert!(script.contains("http://127.0.0.1:57321/overlay/image"));
 }
@@ -84,7 +153,10 @@ fn injection_script_installs_image_overlay_from_data_uri() {
     let script = assets::injection_script(57321);
 
     assert!(script.contains("const source = config.dataUrl || \"\""));
-    assert!(script.contains("image.src = source"));
+    assert!(script.contains("backgroundImage: `url(\"${source.replace(/\"/g, \"%22\")}\")`"));
+    assert!(script.contains(
+        "fit: { size: \"contain\", position: \"center center\", repeat: \"no-repeat\" }"
+    ));
     assert!(script.contains("image_overlay_installed"));
 }
 
@@ -117,7 +189,7 @@ fn injection_script_times_out_backend_bridge_calls_and_falls_back_to_helper() {
 
     assert!(script.contains("bridgeWithBackendTimeout"));
     assert!(script.contains("backend_bridge_timeout"));
-    assert!(script.contains("/backend/repair"));
+    assert!(!script.contains("/backend/repair"));
     assert!(script.contains("backend_status_bridge_failed_http_fallback_ok"));
     assert!(script.contains("backend_status_bridge_and_http_failed"));
 }
@@ -130,16 +202,118 @@ fn injection_script_explains_plugin_patch_is_unneeded_in_relay_mode() {
 }
 
 #[test]
-fn injection_script_menu_exposes_three_independent_plugin_switches() {
+fn injection_script_menu_exposes_marketplace_plugin_switch_only() {
     let script = assets::injection_script(57321);
 
     assert!(script.contains("插件市场解锁"));
     assert!(script.contains("data-codex-plus-setting=\"pluginMarketplaceUnlock\""));
-    assert!(script.contains("强制解锁入口"));
-    assert!(script.contains("data-codex-plus-setting=\"pluginEntryUnlock\""));
-    assert!(script.contains("特殊插件强制安装"));
-    assert!(script.contains("data-codex-plus-setting=\"forcePluginInstall\""));
-    assert!(script.contains("恢复 1.1.9 的入口解锁方式"));
+    assert!(!script.contains("特殊插件强制安装"));
+    assert!(!script.contains("data-codex-plus-setting=\"forcePluginInstall\""));
+    assert!(!script.contains("forcePluginInstall"));
+    assert!(!script.contains("强制解锁入口"));
+    assert!(!script.contains("data-codex-plus-setting=\"pluginEntryUnlock\""));
+}
+
+#[test]
+fn injection_script_menu_exposes_stepwise_switch_and_syncs_panel() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("stepwise: false"));
+    assert!(script.contains("stepwise: \"codexAppStepwiseEnabled\""));
+    assert!(script.contains("Stepwise"));
+    assert!(script.contains("data-codex-plus-setting=\"stepwise\""));
+    assert!(script.contains("function syncStepwisePanel"));
+    assert!(script.contains("window.__codexStepwisePanel?.syncSettings"));
+    assert!(script.contains("if (key === \"stepwise\") syncStepwisePanel(value)"));
+    assert!(script.contains("if (patch?.enabled === true)"));
+    assert!(script.contains("activateRuntime();"));
+}
+
+#[test]
+fn stepwise_direct_send_targets_main_chat_composer() {
+    let script = assets::stepwise_script();
+
+    assert!(script.contains("function elementCenter("));
+    assert!(script.contains("function horizontalOverlapRatio("));
+    assert!(script.contains("function ignoredComposerContainer("));
+    assert!(script.contains("function mainComposerCandidate("));
+    assert!(script.contains("mainComposerCandidate(candidates)"));
+    assert!(!script.contains("const target = candidates[candidates.length - 1];"));
+}
+
+#[test]
+fn stepwise_scan_does_not_require_composer_for_suggestions() {
+    let script = assets::stepwise_script();
+
+    assert!(!script.contains("if (!composerCandidates().length) return false;"));
+}
+
+#[test]
+fn stepwise_assistant_detection_accepts_two_action_buttons() {
+    let script = assets::stepwise_script();
+
+    assert!(script.contains("if (count >= 2) return current;"));
+    assert!(script.contains("if (count < 2) continue;"));
+    assert!(!script.contains("if (count >= 3) return current;"));
+    assert!(!script.contains("if (count < 3) continue;"));
+}
+
+#[test]
+fn stepwise_refreshes_suggestions_for_virtualized_assistant_bubbles() {
+    let script = assets::stepwise_script();
+
+    assert!(script.contains("function assistantBubbleCandidates("));
+    assert!(script.contains("\".group.flex.min-w-0.flex-col\""));
+    assert!(script.contains("candidates.push(...assistantBubbleCandidates())"));
+    assert!(script.contains("function latestMessageByDocumentOrder("));
+    assert!(script.contains("function clearPromptsForNewAssistant("));
+    assert!(script.contains(
+        "if (state.prompts.length || state.currentHash) clearPromptsForNewAssistant(hash);"
+    ));
+    assert!(script.contains("function setScanStatus("));
+    assert!(script.contains("setScanStatus(\"not-ready\""));
+    assert!(script.contains("setScanStatus(\"no-assistant-message\""));
+    assert!(!script.contains("setScanStatus(\"surface-not-ready\""));
+    assert!(!script.contains("return fallback[fallback.length - 1] || null;"));
+}
+
+#[test]
+fn stepwise_exposes_manual_refresh_without_refreshing_busy_chats() {
+    let script = assets::stepwise_script();
+
+    assert!(script.contains("data-action=\"refresh\""));
+    assert!(script.contains("function forceRefreshStepwise("));
+    assert!(script.contains("state.bridgeStatus === \"pending\" || chatBusy()"));
+    assert!(script.contains("setScanStatus(\"manual-refresh-busy\""));
+    assert!(script.contains("state.bridgeCache.delete(bridgeKey)"));
+    assert!(script.contains("requestBridgeStepwise(bridgeKey, userText, assistantText)"));
+}
+
+#[test]
+fn injection_script_defers_backend_mapped_toggles_until_settings_load() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("const codexPlusBackendMappedSettings = new Set"));
+    assert!(
+        script
+            .contains("codexPlusBackendMappedSettings.has(key) && !codexPlusBackendSettingsLoaded")
+    );
+    assert!(script.contains("button.dataset.pending = String(waitsForBackend)"));
+    assert!(script.contains(
+        "button.disabled = waitsForBackend || button.dataset.relayUnneeded === \"true\""
+    ));
+    assert!(script.contains("toggle.disabled || toggle.dataset.pending === \"true\""));
+}
+
+#[test]
+fn injection_script_ignores_stale_backend_settings_responses() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("let codexPlusBackendSettingsSeq = 0"));
+    assert!(script.contains("const seq = codexPlusBackendSettingsSeq"));
+    assert!(script.contains("if (seq !== codexPlusBackendSettingsSeq)"));
+    assert!(script.contains("const seq = ++codexPlusBackendSettingsSeq"));
+    assert!(script.contains("if (seq === codexPlusBackendSettingsSeq)"));
 }
 
 #[test]
@@ -150,6 +324,15 @@ fn injection_script_skips_plugin_patch_work_in_relay_mode() {
     assert!(script.contains("!codexPlusBackendSettingsLoaded"));
     assert!(script.contains("if (pluginPatchDisabledInRelayMode()) return"));
     assert!(script.contains("clearPluginPatchArtifacts()"));
+}
+
+#[test]
+fn injection_script_disables_plugin_auto_expand_in_relay_mode() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("settings.pluginAutoExpand = false"));
+    assert!(script.contains("if (pluginPatchDisabledInRelayMode()) return"));
+    assert!(script.contains("if (!codexPlusSettings().pluginAutoExpand) return"));
 }
 
 #[test]
@@ -169,29 +352,23 @@ fn injection_script_gates_legacy_and_modern_plugin_unlock_by_codex_version() {
     let script = assets::injection_script(57321);
 
     assert!(script.contains("const pluginUnlockStrategy = codexPluginUnlockStrategy()"));
-    assert!(script.contains("if ((pluginUnlockStrategy === \"legacy\" || pluginUnlockStrategy === \"unknown\") && settings.pluginEntryUnlock)"));
     assert!(script.contains("if ((pluginUnlockStrategy === \"modern\" || pluginUnlockStrategy === \"unknown\") && settings.pluginMarketplaceUnlock)"));
     assert!(script.contains("plugin_unlock_strategy_selected"));
     assert!(script.contains("window.__codexPluginUnlockStrategyLogged"));
 }
 
 #[test]
-fn injection_script_restores_legacy_plugin_sidebar_entry_unlock() {
+fn injection_script_removes_legacy_plugin_sidebar_entry_unlock() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("pluginEntryUnlock: true"));
-    assert!(script.contains("pluginEntryUnlock: \"codexAppPluginEntryUnlock\""));
-    assert!(script.contains("function reactFiberFrom(element)"));
-    assert!(script.contains("function authContextValueFrom(element)"));
-    assert!(script.contains("function spoofChatGPTAuthMethod(element)"));
-    assert!(script.contains("auth.setAuthMethod(\"chatgpt\")"));
-    assert!(script.contains("function pluginEntryButton()"));
-    assert!(script.contains("function enablePluginEntry()"));
-    assert!(script.contains("if (!codexPlusSettings().pluginEntryUnlock) return"));
-    assert!(script.contains("pluginButton.addEventListener(\"click\", () => {"));
-    assert!(script.contains("spoofChatGPTAuthMethod(pluginButton);"));
-    assert!(script.contains("插件 - 已解锁"));
-    assert!(script.contains("Plugins - Unlocked"));
+    assert!(!script.contains("pluginEntryUnlock"));
+    assert!(!script.contains("codexAppPluginEntryUnlock"));
+    assert!(!script.contains("function spoofChatGPTAuthMethod(element)"));
+    assert!(!script.contains("auth.setAuthMethod(\"chatgpt\")"));
+    assert!(!script.contains("function pluginEntryButton()"));
+    assert!(!script.contains("function enablePluginEntry()"));
+    assert!(!script.contains("插件 - 已解锁"));
+    assert!(!script.contains("Plugins - Unlocked"));
 }
 
 #[test]
@@ -206,35 +383,53 @@ fn injection_script_keeps_plugin_marketplace_unlock_separate_from_entry_unlock()
 }
 
 #[test]
-fn injection_script_unlocks_nested_disabled_plugin_install_buttons() {
+fn injection_script_localizes_codex_menu_commands() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("const codexMenuLocalizationMap = new Map"));
+    assert!(script.contains("[\"Toggle Sidebar\", \"切换侧边栏\"]"));
+    assert!(script.contains("[\"Toggle Bottom Panel\", \"切换底部面板\"]"));
+    assert!(script.contains("[\"Toggle Pinned Summary\", \"切换置顶摘要\"]"));
+    assert!(script.contains("[\"Open Terminal\", \"打开终端\"]"));
+    assert!(script.contains("[\"Open Browser Tab\", \"打开浏览器标签页\"]"));
+    assert!(script.contains("[\"Focus Browser Address Bar\", \"聚焦浏览器地址栏\"]"));
+    assert!(script.contains("[\"Reload Browser Page\", \"重新加载浏览器页面\"]"));
+    assert!(script.contains("[\"Toggle Side Panel\", \"切换侧边面板\"]"));
+    assert!(script.contains("[\"Actual Size\", \"实际大小\"]"));
+    assert!(script.contains("function localizeCodexMenus"));
+    assert!(script.contains("localizeCodexMenus();"));
+}
+
+#[test]
+fn injection_script_does_not_unlock_disabled_plugin_install_buttons() {
     let script = assets::injection_script(57321);
 
     assert!(script.contains("button[aria-disabled=\"true\"]"));
     assert!(script.contains("[role=\"button\"][data-disabled]"));
-    assert!(script.contains("installButtonUnlockNodes"));
-    assert!(script.contains("patchReactDisabledProps"));
-    assert!(script.contains("props[\"data-disabled\"] = undefined"));
-    assert!(script.contains("button.querySelectorAll?.(\"button, [role='button'], [disabled], [aria-disabled], [data-disabled]"));
-    assert!(script.contains("button.dataset.codexForceInstallUnlocked"));
+    assert!(!script.contains("installButtonUnlockNodes"));
+    assert!(!script.contains("patchReactDisabledProps"));
+    assert!(!script.contains("props[\"data-disabled\"] = undefined"));
+    assert!(!script.contains("button.querySelectorAll?.(\"button, [role='button'], [disabled], [aria-disabled], [data-disabled]"));
+    assert!(!script.contains("button.dataset.codexForceInstallUnlocked"));
 }
 
 #[test]
 fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
-    assert!(script.contains("if (name === \"openai-bundled\") return \"\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
+    assert!(!script.contains("function pluginMarketplaceAliasForName"));
     assert!(
         !script.contains("if (name === \"openai-bundled\") return \"codex-plus-openai-bundled\"")
     );
-    assert!(script.contains("if (name === \"openai-bundled\" || name === \"codex-plus-openai-bundled\") return \"OpenAI插件1(Codex++)\""));
+    assert!(script.contains("if (name === \"openai-bundled\") return \"OpenAI插件1(Codex++)\""));
 }
 
 #[test]
 fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
     assert!(script.contains("isCodexPluginBuildFlavorFilter"));
     assert!(script.contains("source.includes(\"!u(e.marketplaceName)||e.marketplaceName===r\")"));
     assert!(script.contains("source.includes(\"!t.includes(e.name)\")"));
@@ -246,8 +441,9 @@ fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
 fn injection_script_expands_api_key_plugin_marketplace_requests() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
+    assert!(script.contains("installPluginMarketplaceBridgePatch"));
     assert!(script.contains("installPluginBuildFlavorFilterPatch"));
     assert!(script.contains("Array.prototype.filter"));
     assert!(script.contains("codexPluginBuildFlavorFilterPatch"));
@@ -261,20 +457,35 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     ));
     assert!(script.contains("plugin_marketplace_hidden_filter_bypassed"));
     assert!(script.contains("method === \"list-plugins\""));
-    assert!(script.contains("delete next.marketplaceKinds"));
+    assert!(script.contains("method === \"vscode://codex/list-plugins\""));
+    assert!(script.contains("message.type === \"fetch\""));
+    assert!(script.contains("data?.type === \"fetch-response\""));
+    assert!(script.contains("__codexPluginMarketplaceFetchRequestIds"));
+    assert!(script.contains("const nextKinds = Array.isArray(next.marketplaceKinds)"));
+    assert!(script.contains("if (!nextKinds.includes(\"vertical\")) nextKinds.push(\"vertical\")"));
+    assert!(script.contains("next.marketplaceKinds = Array.from(new Set(nextKinds))"));
     assert!(script.contains("patchPluginMarketplaceResult"));
-    assert!(script.contains("pluginMarketplaceAliasForName"));
-    assert!(script.contains("marketplace.name = alias"));
+    assert!(script.contains("__CODEX_PLUS_PLUGIN_MARKETPLACES__"));
+    assert!(script.contains("mergeLocalPluginMarketplaces(result)"));
+    assert!(script.contains("plugin_marketplace_local_merged"));
+    assert!(script.contains("cloned.marketplaceName = marketplaceName"));
+    assert!(script.contains("cloned.marketplacePath = marketplaceName"));
     assert!(script.contains("restorePluginMarketplaceName"));
     assert!(script.contains(
         "next.remoteMarketplaceName = restorePluginMarketplaceName(next.remoteMarketplaceName)"
     ));
-    assert!(script.contains("if (name === \"openai-bundled\") return \"\""));
+    assert!(!script.contains("marketplace.name = alias"));
+    assert!(script.contains("if (name === \"openai-curated\") return \"OpenAI插件2(Codex++)\""));
     assert!(
-        script.contains("if (name === \"openai-curated\") return \"codex-plus-openai-curated\"")
+        script.contains("if (name === \"openai-primary-runtime\") return \"OpenAI插件3(Codex++)\"")
+    );
+    assert!(script.contains("restored === \"openai-api-curated\""));
+    assert!(script.contains("restored === \"openai-curated-remote\""));
+    assert!(
+        script.contains("if (name === \"openai-curated-remote\") return \"OpenAI插件5(Codex++)\"")
     );
     assert!(script.contains(
-        "if (name === \"openai-primary-runtime\") return \"codex-plus-openai-primary-runtime\""
+        "if (name === \"codex-plus-openai-curated-remote\") return \"openai-curated-remote\""
     ));
     assert!(script.contains("OpenAI插件1(Codex++)"));
     assert!(script.contains("OpenAI插件2(Codex++)"));
@@ -290,14 +501,14 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
 }
 
 #[test]
-fn injection_script_deletes_marketplace_kinds_to_request_default_catalog() {
+fn injection_script_preserves_vertical_marketplace_kind_for_official_plugins() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("delete next.marketplaceKinds"));
     assert!(script.contains("plugin_marketplace_request_expanded"));
+    assert!(script.contains("if (!nextKinds.includes(\"vertical\")) nextKinds.push(\"vertical\")"));
     assert!(!script.contains("codexPluginAllowedMarketplaceKinds"));
     assert!(!script.contains("codexPluginExpandedMarketplaceKinds"));
-    assert!(!script.contains("next.marketplaceKinds = Array.from(new Set"));
+    assert!(!script.contains("delete next.marketplaceKinds"));
 }
 
 #[test]
@@ -311,13 +522,13 @@ fn injection_script_logs_marketplace_grouping_diagnostics() {
 }
 
 #[test]
-fn injection_script_keeps_force_install_unlock_visual_state_sticky() {
+fn injection_script_omits_force_install_unlock_loop() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("codex-force-install-unlocked"));
-    assert!(script.contains("codexForcePluginInstallRefreshIntervalMs"));
-    assert!(script.contains("refreshForcePluginInstallUnlockLoop"));
-    assert!(script.contains("setInterval(() => {"));
+    assert!(!script.contains("codex-force-install-unlocked"));
+    assert!(!script.contains("codexForcePluginInstallRefreshIntervalMs"));
+    assert!(!script.contains("refreshForcePluginInstallUnlockLoop"));
+    assert!(!script.contains("__codexForcePluginInstallRefreshTimer"));
 }
 
 #[test]
@@ -525,6 +736,32 @@ fn injection_script_prompts_for_markdown_export_path_when_supported() {
     assert!(script.contains("await writable.write(markdown)"));
     assert!(script.contains("status: \"cancelled\""));
     assert!(script.contains("导出已取消"));
+}
+
+#[test]
+fn injection_script_discovers_vscode_api_asset_without_hardcoded_hash() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("loadCodexAppModule(\"vscode-api-\""));
+    assert!(script.contains("codexAppAssetUrlFromScriptText"));
+    assert!(script.contains("fetch(src"));
+    assert!(!script.contains("vscode-api-Dc9pX2Bc.js"));
+    assert!(!script.contains("import(\"./assets/vscode-api-"));
+}
+
+#[test]
+fn injection_script_clears_project_state_when_moving_to_projectless() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("async function clearThreadWorkspaceHints"));
+    assert!(script.contains("async function clearThreadWritableRoots"));
+    assert!(script.contains("async function clearThreadProjectlessOutputDirectories"));
+    assert!(script.contains("thread-workspace-root-hints"));
+    assert!(script.contains("thread-writable-roots"));
+    assert!(script.contains("thread-projectless-output-directories"));
+    assert!(script.contains("await clearThreadWorkspaceHints(ref)"));
+    assert!(script.contains("await clearThreadWritableRoots(ref)"));
+    assert!(script.contains("await clearThreadProjectlessOutputDirectories(ref)"));
 }
 
 #[test]
@@ -790,6 +1027,19 @@ fn manager_ui_exposes_pure_api_relay_mode_button() {
 }
 
 #[test]
+fn manager_ui_disables_plugin_auto_expand_in_compatible_mode() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-plus-core");
+    let source = std::fs::read_to_string(repo.join("apps/codex-plus-manager/src/App.tsx")).unwrap();
+
+    assert!(source.contains(
+        "checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode}"
+    ));
+}
+
+#[test]
 fn cdp_target_deserializes_websocket_field() {
     let target: CdpTarget = serde_json::from_value(json!({
         "id": "page-1",
@@ -963,6 +1213,99 @@ fn pick_injectable_codex_page_target_rejects_non_codex_pages() {
             .to_string()
             .contains("No injectable Codex page target found")
     );
+}
+
+#[test]
+fn pick_injectable_codex_page_target_accepts_chatgpt_desktop_page() {
+    let targets = vec![target(
+        "chatgpt",
+        "page",
+        "ChatGPT",
+        "https://chatgpt.com/",
+        Some("ws://chatgpt"),
+    )];
+
+    let picked = pick_injectable_codex_page_target(&targets)
+        .expect("ChatGPT desktop page should be selected");
+
+    assert_eq!(picked.id, "chatgpt");
+}
+
+#[test]
+fn pick_injectable_codex_page_target_accepts_chatgpt_desktop_error_page() {
+    let targets = vec![target(
+        "chatgpt-error",
+        "page",
+        "ChatGPT",
+        "data:text/html;charset=utf-8,%3Ctitle%3EChatGPT%3C/title%3E",
+        Some("ws://chatgpt-error"),
+    )];
+
+    let picked = pick_injectable_codex_page_target(&targets)
+        .expect("ChatGPT desktop error page should be selected");
+
+    assert_eq!(picked.id, "chatgpt-error");
+}
+
+#[test]
+fn avatar_overlay_target_detection_is_narrow() {
+    let overlay = target(
+        "avatar",
+        "page",
+        "ChatGPT Avatar Overlay",
+        "app://-/index.html?initialRoute=%2Favatar-overlay",
+        Some("ws://avatar"),
+    );
+    let main = target(
+        "main",
+        "page",
+        "ChatGPT",
+        "https://chatgpt.com/",
+        Some("ws://main"),
+    );
+
+    assert!(is_avatar_overlay_page_target(&overlay));
+    assert!(!is_primary_codex_page_target(&overlay));
+    assert!(!is_avatar_overlay_page_target(&main));
+    assert!(is_primary_codex_page_target(&main));
+    assert!(!is_avatar_overlay_page_target(&target(
+        "external",
+        "page",
+        "avatar-overlay",
+        "https://example.test/avatar-overlay",
+        Some("ws://external"),
+    )));
+}
+
+#[test]
+fn primary_target_selection_skips_v1_and_v2_overlay_candidates() {
+    let targets = vec![
+        target(
+            "v1-overlay",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=%2Favatar-overlay",
+            Some("ws://v1"),
+        ),
+        target(
+            "v2-overlay",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=/avatar-overlay",
+            Some("ws://v2"),
+        ),
+        target(
+            "main",
+            "page",
+            "Codex",
+            "app://-/index.html",
+            Some("ws://main"),
+        ),
+    ];
+
+    let selected = pick_injectable_codex_page_target(&targets).unwrap();
+
+    assert_eq!(selected.id, "main");
 }
 
 #[test]

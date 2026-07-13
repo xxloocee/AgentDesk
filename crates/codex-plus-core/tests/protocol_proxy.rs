@@ -3,8 +3,14 @@ use codex_plus_core::protocol_proxy::{
     chat_completion_to_response_with_request, chat_completions_url, chat_sse_to_responses_sse,
     chat_sse_to_responses_sse_with_request, is_chat_completions_proxy_path, is_models_proxy_path,
     is_responses_proxy_path, models_url, open_chat_completions_proxy_request,
-    open_models_proxy_request, open_responses_proxy_request, responses_error_from_upstream,
-    responses_to_chat_completions,
+    open_models_proxy_request, open_responses_proxy_request,
+    open_responses_proxy_request_with_settings, responses_error_from_upstream,
+    responses_to_chat_completions, send_upstream_request_with_header_timeout,
+    upstream_header_timeout, upstream_http_client, upstream_stream_header_timeout,
+};
+use codex_plus_core::settings::{
+    AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
+    RelayMode, RelayProfile,
 };
 use serde_json::json;
 use std::io::{Read, Write};
@@ -12,6 +18,8 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
 fn responses_request_converts_to_chat_completions() {
@@ -615,6 +623,59 @@ fn responses_input_flattens_namespace_function_history_and_skips_invalid_tool_it
     );
     assert_eq!(converted["messages"][1]["tool_call_id"], "call_ns");
     assert_eq!(converted["messages"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn responses_input_sanitizes_invalid_function_call_arguments_history() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "gpt-5-mini",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "bad_object",
+                "name": "broken_args",
+                "arguments": "{foo: \"bar\"}"
+            },
+            {
+                "type": "function_call",
+                "call_id": "plain_text",
+                "name": "plain_args",
+                "arguments": "raw text with \"quotes\" and \\slashes"
+            },
+            {
+                "type": "function_call",
+                "call_id": "array_args",
+                "name": "array_args",
+                "arguments": "[1,2,3]"
+            },
+            {
+                "type": "tool_call",
+                "tool_use": {
+                    "id": "object_args",
+                    "name": "object_args",
+                    "input": { "ok": true }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    let calls = converted["messages"][0]["tool_calls"].as_array().unwrap();
+    for call in calls {
+        let arguments = call["function"]["arguments"].as_str().unwrap();
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .expect("chat tool call arguments must always be valid JSON");
+    }
+    assert_eq!(
+        calls[0]["function"]["arguments"],
+        "{\"input\":\"{foo: \\\"bar\\\"}\"}"
+    );
+    assert_eq!(
+        calls[1]["function"]["arguments"],
+        "{\"input\":\"raw text with \\\"quotes\\\" and \\\\slashes\"}"
+    );
+    assert_eq!(calls[2]["function"]["arguments"], "{\"input\":[1,2,3]}");
+    assert_eq!(calls[3]["function"]["arguments"], "{\"ok\":true}");
 }
 
 #[test]
@@ -1246,6 +1307,189 @@ fn models_proxy_path_matches_v1_models() {
     assert!(!is_models_proxy_path("/v1/responses"));
 }
 
+#[test]
+fn upstream_header_timeout_is_bounded_for_hung_providers() {
+    assert!(upstream_header_timeout() >= Duration::from_secs(30));
+    assert!(upstream_header_timeout() <= Duration::from_secs(60));
+    assert!(upstream_stream_header_timeout() >= Duration::from_secs(120));
+}
+
+#[tokio::test]
+async fn upstream_request_returns_when_provider_accepts_but_never_sends_headers() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let Ok((_stream, _addr)) = listener.accept().await else {
+            return;
+        };
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+
+    let started = Instant::now();
+    let result = send_upstream_request_with_header_timeout(
+        upstream_http_client()
+            .unwrap()
+            .get(format!("http://{addr}/v1/models")),
+        Duration::from_millis(100),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    server.abort();
+}
+
+#[tokio::test]
+async fn aggregate_proxy_fails_over_to_next_member_in_same_request() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let first = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let first_addr = first.local_addr().unwrap();
+    let second = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let second_addr = second.local_addr().unwrap();
+    let first_server = tokio::spawn(respond_once(
+        first,
+        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 11\r\ncontent-type: application/json\r\n\r\n{\"error\":1}",
+    ));
+    let second_server = tokio::spawn(respond_once(
+        second,
+        "HTTP/1.1 200 OK\r\ncontent-length: 35\r\ncontent-type: application/json\r\n\r\n{\"id\":\"resp_1\",\"object\":\"response\"}",
+    ));
+    let settings = aggregate_proxy_settings(
+        "failover",
+        format!("http://{first_addr}/v1"),
+        format!("http://{second_addr}/v1"),
+    );
+
+    let result = open_responses_proxy_request_with_settings(
+        r#"{"model":"gpt-5-mini","input":"hi","stream":false}"#,
+        settings,
+    )
+    .await
+    .unwrap();
+    let body = result.response.bytes().await.unwrap();
+
+    assert_eq!(result.status_code, 200);
+    assert_eq!(body.as_ref(), br#"{"id":"resp_1","object":"response"}"#);
+    first_server.await.unwrap();
+    second_server.await.unwrap();
+}
+
+#[tokio::test]
+async fn aggregate_stream_request_sends_sse_accept_header() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let fallback = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let fallback_addr = fallback.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        let read = stream.read(&mut buffer).await.unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 14\r\ncontent-type: text/event-stream\r\n\r\ndata: [DONE]\n\n",
+            )
+            .await
+            .unwrap();
+        request
+    });
+    let fallback_server = tokio::spawn(respond_once(
+        fallback,
+        "HTTP/1.1 200 OK\r\ncontent-length: 14\r\ncontent-type: text/event-stream\r\n\r\ndata: [DONE]\n\n",
+    ));
+    let settings = aggregate_proxy_settings(
+        "stream",
+        format!("http://{addr}/v1"),
+        format!("http://{fallback_addr}/v1"),
+    );
+
+    let result = open_responses_proxy_request_with_settings(
+        r#"{"model":"gpt-5-mini","input":"hi","stream":true}"#,
+        settings,
+    )
+    .await
+    .unwrap();
+    let request = server.await.unwrap();
+
+    assert_eq!(result.status_code, 200);
+    assert!(result.is_stream);
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("accept: text/event-stream")
+    );
+    fallback_server.abort();
+}
+
+async fn respond_once(listener: tokio::net::TcpListener, response: &'static str) {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let mut buffer = [0; 1024];
+    let _ = stream.read(&mut buffer).await.unwrap();
+    stream.write_all(response.as_bytes()).await.unwrap();
+}
+
+fn aggregate_proxy_settings(
+    id_suffix: &str,
+    first_base_url: String,
+    second_base_url: String,
+) -> BackendSettings {
+    let first_id = format!("proxy-{id_suffix}-a");
+    let second_id = format!("proxy-{id_suffix}-b");
+    let aggregate_id = format!("proxy-{id_suffix}-agg");
+    BackendSettings {
+        relay_profiles: vec![
+            RelayProfile {
+                id: first_id.clone(),
+                name: "first".to_string(),
+                base_url: first_base_url,
+                api_key: "sk-first".to_string(),
+                ..RelayProfile::default()
+            },
+            RelayProfile {
+                id: second_id.clone(),
+                name: "second".to_string(),
+                base_url: second_base_url,
+                api_key: "sk-second".to_string(),
+                ..RelayProfile::default()
+            },
+            RelayProfile {
+                id: aggregate_id.clone(),
+                name: "aggregate".to_string(),
+                relay_mode: RelayMode::Aggregate,
+                ..RelayProfile::default()
+            },
+        ],
+        active_relay_id: aggregate_id.clone(),
+        active_aggregate_relay_id: aggregate_id.clone(),
+        aggregate_relay_profiles: vec![AggregateRelayProfile {
+            id: aggregate_id,
+            name: "aggregate".to_string(),
+            strategy: AggregateRelayStrategy::RequestRoundRobin,
+            members: vec![
+                AggregateRelayMember {
+                    relay_id: first_id,
+                    weight: 1,
+                },
+                AggregateRelayMember {
+                    relay_id: second_id,
+                    weight: 1,
+                },
+            ],
+        }],
+        ..BackendSettings::default()
+    }
+}
 #[tokio::test]
 async fn chat_completions_proxy_uses_configured_user_agent() {
     let _lock = settings_path_test_lock().lock().unwrap();
