@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DIST="$ROOT/dist/macos"
 STAGE="$DIST/stage"
 BINARY_DIR="${BINARY_DIR:-$ROOT/target/release}"
-DMG="$DIST/CodexPlusPlus-${VERSION}-macos-${ARCH}.dmg"
+DMG="$DIST/AgentDesk-${VERSION}-macos-${ARCH}.dmg"
 ICON_SOURCE="$ROOT/apps/codex-plus-manager/src-tauri/icons/icon.png"
 ICON_NAME="codex-plus-plus.icns"
 ICON_ICNS="$DIST/$ICON_NAME"
@@ -118,16 +118,16 @@ verify_app() {
 }
 
 prepare_icon
-create_app "Codex++" "CodexPlusPlus" "$BINARY_DIR/codex-plus-plus" "com.bigpizzav3.codexplusplus" "true"
-create_app "Codex++ 管理工具" "CodexPlusPlusManager" "$BINARY_DIR/codex-plus-plus-manager" "com.bigpizzav3.codexplusplus.manager" "false"
+create_app "AgentDesk" "AgentDesk" "$BINARY_DIR/codex-plus-plus" "com.xxloocee.agentdesk" "true"
+create_app "AgentDesk 管理工具" "AgentDeskManager" "$BINARY_DIR/codex-plus-plus-manager" "com.xxloocee.agentdesk.manager" "false"
 
-sign_app "$STAGE/Codex++.app"
-sign_app "$STAGE/Codex++ 管理工具.app"
+sign_app "$STAGE/AgentDesk.app"
+sign_app "$STAGE/AgentDesk 管理工具.app"
 
-verify_app "$STAGE/Codex++.app"
-verify_app "$STAGE/Codex++ 管理工具.app"
+verify_app "$STAGE/AgentDesk.app"
+verify_app "$STAGE/AgentDesk 管理工具.app"
 
 ln -s /Applications "$STAGE/Applications"
 
-hdiutil create -volname "Codex++" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+hdiutil create -volname "AgentDesk" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 echo "$DMG"

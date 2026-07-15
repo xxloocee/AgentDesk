@@ -1,5 +1,5 @@
 /**
- * Codex++ 供应商预设
+ * AgentDesk 供应商预设
  * 基于 cc-switch (MIT) 的 codexProviderPresets.ts，作者 Jason Young
  * https://github.com/farion1231/cc-switch
  *
@@ -163,22 +163,12 @@ export const PRESETS: ProviderPreset[] = [
 
   // ── 聚合/中转 ──
   {
-    id: "jojocode",
-    name: "JOJO Code",
-    websiteUrl: "https://jojocode.com/",
-    apiKeyUrl: "https://jojocode.com/",
+    id: "ergouzi",
+    name: "Ergouzi 二狗子",
+    websiteUrl: "https://ergouzi.life",
+    apiKeyUrl: "https://ergouzi.life",
     category: "aggregator",
-    baseUrl: "https://jojocode.com/v1",
-    protocol: "responses",
-    model: "gpt-5.5",
-  },
-  {
-    id: "jojocode-max",
-    name: "JOJO Code 包月",
-    websiteUrl: "https://max.jojocode.com/",
-    apiKeyUrl: "https://max.jojocode.com/",
-    category: "aggregator",
-    baseUrl: "https://max.jojocode.com/v1",
+    baseUrl: "https://ergouzi.life/v1",
     protocol: "responses",
     model: "gpt-5.5",
   },
@@ -196,7 +186,7 @@ export const PRESETS: ProviderPreset[] = [
     id: "siliconflow",
     name: "SiliconFlow",
     websiteUrl: "https://siliconflow.cn",
-    apiKeyUrl: "https://cloud.siliconflow.cn/i/drGuwc9k",
+    apiKeyUrl: "https://cloud.siliconflow.cn",
     category: "aggregator",
     baseUrl: "https://api.siliconflow.cn/v1",
     protocol: "chatCompletions",

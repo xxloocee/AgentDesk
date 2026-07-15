@@ -977,7 +977,7 @@ export function App() {
     const result = await run(() => call<PendingProviderImportResult>("load_pending_provider_import"));
     if (result) {
       setPendingProviderImport(result.pending);
-      if (!silent && !isSuccessStatus(result.status)) showResultNotice(t("Codex++ 导入"), result, { silentSuccess: true });
+      if (!silent && !isSuccessStatus(result.status)) showResultNotice(t("AgentDesk 导入"), result, { silentSuccess: true });
     }
     return result;
   };
@@ -988,7 +988,7 @@ export function App() {
       setPendingProviderImport(null);
       setSettings(result);
       setSettingsForm(normalizeSettings(result.settings));
-      showResultNotice(t("Codex++ 导入"), result);
+      showResultNotice(t("AgentDesk 导入"), result);
       await refreshCcsProviders(true);
     }
   };
@@ -997,7 +997,7 @@ export function App() {
     const result = await run(() => call<PendingProviderImportResult>("dismiss_pending_provider_import"));
     if (result) {
       setPendingProviderImport(null);
-      showResultNotice(t("Codex++ 导入"), result, { silentSuccess: true });
+      showResultNotice(t("AgentDesk 导入"), result, { silentSuccess: true });
     }
   };
 
@@ -1210,7 +1210,7 @@ export function App() {
   const restart = async () => {
     const result = await launchCommand("restart_codex_plus");
     if (result) {
-      showNotice(t("重启 Codex++"), result.message, result.status);
+      showNotice(t("重启 Codex"), result.message, result.status);
       await refreshOverview(true);
     }
   };
@@ -1870,7 +1870,7 @@ export function App() {
       void invoke("update_tray_labels", {
         showLabel: "Show window",
         quitLabel: "Quit",
-        windowTitle: "Codex++ Manager",
+        windowTitle: "AgentDesk Manager",
       });
     }
   }, []);
@@ -2062,10 +2062,10 @@ export function App() {
     <div className={`shell ${theme}`}>
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">C++</div>
+          <div className="brand-mark">AD</div>
           <div className="brand-copy">
             <div className="brand-title-row">
-              <div className="brand-title">Codex++</div>
+              <div className="brand-title">AgentDesk</div>
               {hasUpdate ? (
                 <button
                   className="update-dot"
@@ -2127,9 +2127,9 @@ export function App() {
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
-            <Button onClick={() => void actions.restart()} title={t("重启 Codex++")} variant="outline">
+            <Button onClick={() => void actions.restart()} title={t("重启 Codex")} variant="outline">
               <Rocket className="h-4 w-4" />
-              {t("重启 Codex++")}
+              {t("重启 Codex")}
             </Button>
             <Button onClick={() => void actions.refreshCurrent()} size="icon" title={t("刷新当前页面")} variant="outline">
               <RefreshCw className="h-4 w-4" />
@@ -2353,27 +2353,22 @@ function OverviewScreen({
                 <Network className="h-5 w-5" />
               </div>
               <div>
-                <span className="eyebrow">{t("官方中转站")}</span>
-                <h2>JOJO Code</h2>
+                <span className="eyebrow">{t("推荐中转")}</span>
+                <h2>Ergouzi 二狗子</h2>
                 <p>
-                  {t("Codex++ 官方中转站，主打稳定接入和划算价格，支持 GPT-5.6 全系列、Fable 5、Sonnet 5、GPT-5.5、GPT-5.4、Claude Opus 4.8、Claude Opus 4.7、gpt-image-2 等模型与图像能力。")}
+                  {t("统一的 AI 模型聚合与分发网关，支持 OpenAI、Claude、Grok 兼容接口。Codex 中转注入默认使用 https://ergouzi.life/v1。")}
                 </p>
               </div>
             </div>
             <div className="jojocode-overview-side">
               <div className="jojocode-model-tags">
-                <span>GPT-5.6 全系列</span>
-                <span>Fable 5</span>
-                <span>Sonnet 5</span>
-                <span>GPT-5.5</span>
-                <span>GPT-5.4</span>
-                <span>Opus 4.8</span>
-                <span>Opus 4.7</span>
-                <span>gpt-image-2</span>
+                <span>OpenAI</span>
+                <span>Claude</span>
+                <span>Grok</span>
               </div>
-              <Button onClick={() => void actions.openExternalUrl("https://jojocode.com/")}>
+              <Button onClick={() => void actions.openExternalUrl("https://ergouzi.life")}>
                 <ExternalLink className="h-4 w-4" />
-                {t("打开 JOJO Code")}
+                {t("打开二狗子")}
               </Button>
             </div>
           </div>
@@ -2425,7 +2420,7 @@ function OverviewScreen({
           <Toolbar>
             <Button onClick={() => void actions.launch()}>
               <Rocket className="h-4 w-4" />
-              {t("启动 Codex++")}
+              {t("启动 AgentDesk")}
             </Button>
             <Button variant="secondary" onClick={() => void actions.goLogs()}>
               {t("打开关于")}
@@ -2462,7 +2457,7 @@ function RelayEnvironmentScreen({ result, actions }: { result: RelayEnvironmentR
       passed: result ? proxyVariables.length === 0 : false,
       detail: result
         ? proxyVariables.length
-          ? tf("检测到代理环境变量：{0}。请清理后重新启动 Codex++。", [proxyVariableLabels.join(t("、"))])
+          ? tf("检测到代理环境变量：{0}。请清理后重新启动 AgentDesk。", [proxyVariableLabels.join(t("、"))])
           : t("未检测到 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY、NO_PROXY 或 FTP_PROXY。")
         : t("等待检测。"),
     },
@@ -2757,7 +2752,7 @@ function EnhanceScreen({
         String(remotePluginMarketplace.pluginCount),
         String(remotePluginMarketplace.skillCount),
       ])
-    : t("未发现本地缓存；点击按钮会从 Codex++ 内置快照释放并注册，无需官方账号预缓存。");
+    : t("未发现本地缓存；点击按钮会从 AgentDesk 内置快照释放并注册，无需官方账号预缓存。");
   return (
     <>
       <Panel>
@@ -2801,7 +2796,7 @@ function EnhanceScreen({
               <div className="feature-action-row">
                 <div>
                   <strong>{t("官方远端插件缓存")}</strong>
-                  <small>{t("使用 Codex++ 内置快照补齐远端插件，API 模式也可显示和安装 Product Design 插件。")}</small>
+                  <small>{t("使用 AgentDesk 内置快照补齐远端插件，API 模式也可显示和安装 Product Design 插件。")}</small>
                   <small>{remoteMarketplaceSummary}</small>
                 </div>
                 <Badge status={remotePluginMarketplace?.configRegistered ? "ok" : "not_checked"} />
@@ -2839,12 +2834,12 @@ function EnhanceScreen({
               {isWindowsPlatform ? <FeatureToggle title={t("桌宠跟随真实鼠标")} detail={t("仅支持 V2 桌宠；不会修改宠物文件。将 V2 的 Computer Use 光标朝向动作映射到真实鼠标，V1 开启后安全不生效；拖拽、原生悬停或 Computer Use 活跃时自动让步。")} checked={form.codexAppPetRealMouseLook} disabled={!masterEnabled} onChange={(value) => setPersistedEnhanceFlag("codexAppPetRealMouseLook", value)} /> : null}
               <FeatureToggle title={t("强制中文界面")} detail={t("强制启用 Codex App 内置 zh-CN 语言包，避免 Statsig/VPN 不通时回退英文。需重启 Codex 才能完整生效。")} checked={form.codexAppForceChineseLocale} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppForceChineseLocale", value)} />
               <FeatureToggle title={t("快速启动")} detail={t("默认关闭；无 VPN 时可开启，让 Statsig 初始化快速失败，减少启动时长。需重启 Codex 才生效。")} checked={form.codexAppFastStartup} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppFastStartup", value)} />
-              <FeatureToggle title={t("原生菜单栏位置")} detail={t("把 Codex++ 菜单插入 Codex 顶部原生菜单栏。")} checked={form.codexAppNativeMenuPlacement} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeMenuPlacement", value)} />
+              <FeatureToggle title={t("原生菜单栏位置")} detail={t("把 AgentDesk 菜单插入 Codex 顶部原生菜单栏。")} checked={form.codexAppNativeMenuPlacement} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeMenuPlacement", value)} />
               <FeatureToggle title={t("原生菜单汉化")} detail={t("启动时通过本地主进程调试端口汉化 Codex 原生菜单；不修改安装包。需重启 Codex 才生效。")} checked={form.codexAppNativeMenuLocalization} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeMenuLocalization", value)} />
             </FeatureGroup>
             <FeatureGroup title={t("远程项目")} detail={t("连接 Zed Remote 和 upstream worktree 辅助能力。")}>
               <FeatureToggle title="Zed Remote open" detail={t("远程 SSH 文件引用可直接用 Zed Remote Development 打开。")} checked={form.codexAppZedRemoteOpen} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppZedRemoteOpen", value)} />
-              <FeatureToggle title={t("Zed 项目记录")} detail={t("维护 Codex++ 自己的远程项目最近列表。")} checked={form.zedRemoteProjectRegistryEnabled} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("zedRemoteProjectRegistryEnabled", value)} />
+              <FeatureToggle title={t("Zed 项目记录")} detail={t("维护 AgentDesk 自己的远程项目最近列表。")} checked={form.zedRemoteProjectRegistryEnabled} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("zedRemoteProjectRegistryEnabled", value)} />
               <FeatureToggle title={t("同步 Zed settings")} detail={t("高级选项，默认关闭；当前实现不主动改写 Zed settings。")} checked={form.zedRemoteSyncToZedSettings} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("zedRemoteSyncToZedSettings", value)} />
               <FeatureToggle title="Upstream worktree" detail={t("从最新 upstream 分支创建 Git worktree。")} checked={form.codexAppUpstreamWorktreeCreate} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppUpstreamWorktreeCreate", value)} />
             </FeatureGroup>
@@ -2914,7 +2909,7 @@ function ZedRemoteScreen({
   return (
     <>
       <Panel>
-        <CardHead title={t("Zed 远程项目")} detail={tf("{0} 个 Codex++ 可识别项目，默认策略：{1}", [allProjects.length, zedStrategyLabel(form.zedRemoteOpenStrategy)])} />
+        <CardHead title={t("Zed 远程项目")} detail={tf("{0} 个 AgentDesk 可识别项目，默认策略：{1}", [allProjects.length, zedStrategyLabel(form.zedRemoteOpenStrategy)])} />
         <CardContent>
           <div className="metric-list">
             <Metric label="Current" value={String(currentProjects.length)} />
@@ -2942,7 +2937,7 @@ function ZedRemoteScreen({
               />
               <span>
                 <strong>{t("记录最近打开")}</strong>
-                <small>{t("保存到 Codex++ state，不改写 Zed settings。")}</small>
+                <small>{t("保存到 AgentDesk state，不改写 Zed settings。")}</small>
               </span>
             </label>
           </div>
@@ -3219,7 +3214,7 @@ function SessionsScreen({
             />
             <span>
               <strong>{t("启动前自动修复历史会话")}</strong>
-              <small>{t("开启后，通过 Codex++ 启动 Codex 前自动整理一次旧对话的归属标记。")}</small>
+              <small>{t("开启后，通过 AgentDesk 启动 Codex 前自动整理一次旧对话的归属标记。")}</small>
             </span>
           </label>
           <Toolbar>
@@ -3293,16 +3288,15 @@ function SessionsScreen({
 function RecommendationsScreen({ ads, actions }: { ads: AdsResult | null; actions: Actions }) {
   const items = (ads?.ads ?? []).filter((ad) => !isExpiredAd(ad));
   const sponsors = items.filter((ad) => ad.type === "sponsor");
-  const normal = items.filter((ad) => ad.type === "normal");
   return (
     <>
       <Panel>
-        <CardHead title={t("推荐内容")} detail={t("与 Codex 内插件菜单使用同一个远端广告源")} />
+        <CardHead title={t("推荐内容")} detail={t("Ergouzi 二狗子模型中转服务")} />
         <CardContent>
           <div className="recommend-hero">
             <div>
               <strong>{ads ? tf("已加载 {0} 条推荐", [items.length]) : t("尚未加载推荐内容")}</strong>
-              <span>{t("内容来自 BigPizzaV3/Ad-List，分为赞助商推荐和普通推荐。")}</span>
+              <span>{t("支持 OpenAI、Claude、Grok 兼容接口。")}</span>
             </div>
             <Button onClick={() => void actions.refreshAds()}>
               <RefreshCw className="h-4 w-4" />
@@ -3312,15 +3306,9 @@ function RecommendationsScreen({ ads, actions }: { ads: AdsResult | null; action
         </CardContent>
       </Panel>
       <Panel>
-        <CardHead title={t("赞助商推荐")} detail={tf("{0} 条", [sponsors.length])} />
+        <CardHead title={t("中转推荐")} detail={tf("{0} 条", [sponsors.length])} />
         <CardContent>
-          <AdGrid actions={actions} ads={sponsors} empty={t("暂无赞助商推荐。")} />
-        </CardContent>
-      </Panel>
-      <Panel>
-        <CardHead title={t("普通推荐")} detail={tf("{0} 条", [normal.length])} />
-        <CardContent>
-          <AdGrid actions={actions} ads={normal} empty={t("暂无普通推荐。")} />
+          <AdGrid actions={actions} ads={sponsors} empty={t("暂无中转推荐。")} />
         </CardContent>
       </Panel>
     </>
@@ -3369,7 +3357,7 @@ function MaintenanceScreen({
         <CardContent>
           <label className="check-row">
             <input checked={removeOwnedData} onChange={(event) => onRemoveOwnedDataChange(event.currentTarget.checked)} type="checkbox" />
-            <span>{t("卸载时移除 Codex++ 托管数据")}</span>
+            <span>{t("卸载时移除 AgentDesk 托管数据")}</span>
           </label>
           <Toolbar>
             <Button onClick={() => void actions.installEntrypoints()}>{t("安装入口")}</Button>
@@ -3379,7 +3367,7 @@ function MaintenanceScreen({
         </CardContent>
       </Panel>
       <Panel>
-        <CardHead title={t("自动接管")} detail={t("Watcher 用于保持 Codex++ 接管状态")} />
+        <CardHead title={t("自动接管")} detail={t("Watcher 用于保持 AgentDesk 接管状态")} />
         <CardContent>
           <Toolbar>
             <Button variant="secondary" onClick={() => void actions.installWatcher()}>{t("安装 watcher")}</Button>
@@ -3435,7 +3423,7 @@ function MaintenanceScreen({
             </Field>
           </div>
           <Toolbar>
-            <Button onClick={() => void actions.launch()}>{t("启动 Codex++")}</Button>
+            <Button onClick={() => void actions.launch()}>{t("启动 AgentDesk")}</Button>
             <Button variant="secondary" onClick={() => void actions.saveManualCodexAppPath()}>
               {t("保存为默认路径")}
             </Button>
@@ -3464,31 +3452,23 @@ function AboutScreen({
   return (
     <>
       <Panel>
-        <CardHead title={t("关于 Codex++")} detail={t("本地 Codex 增强、管理工具和安装包维护")} />
+        <CardHead title={t("关于 AgentDesk")} detail={t("本地 Codex 增强、管理工具和安装包维护")} />
         <CardContent>
           <div className="metric-list">
-            <Metric label={t("Codex++ 版本")} value={overview?.current_version ?? update?.currentVersion ?? "-"} />
+            <Metric label={t("AgentDesk 版本")} value={overview?.current_version ?? update?.currentVersion ?? "-"} />
             <Metric label={t("Codex 版本")} value={overview?.codex_version ?? t("未检测到")} />
-            <Metric label={t("项目地址")} value="github.com/BigPizzaV3/CodexPlusPlus" />
+            <Metric label={t("项目地址")} value="github.com/xxloocee/AgentDesk" />
           </div>
           <Toolbar>
-            <Button onClick={() => void actions.openExternalUrl("https://github.com/BigPizzaV3/CodexPlusPlus")} variant="secondary">
+            <Button onClick={() => void actions.openExternalUrl("https://github.com/xxloocee/AgentDesk")} variant="secondary">
               <ExternalLink className="h-4 w-4" />
               {t("打开项目主页")}
             </Button>
-            <Button onClick={() => void actions.openExternalUrl("https://github.com/BigPizzaV3/CodexPlusPlus/issues")} variant="secondary">
+            <Button onClick={() => void actions.openExternalUrl("https://github.com/xxloocee/AgentDesk/issues")} variant="secondary">
               <ExternalLink className="h-4 w-4" />
               {t("反馈问题")}
             </Button>
-            <Button onClick={() => void actions.openExternalUrl("https://discord.gg/y96kX7A76v")} variant="secondary">
-              <MessageCircle className="h-4 w-4" />
-              Discord
-            </Button>
-            <Button onClick={() => void actions.openExternalUrl("https://t.me/CodexPlusPlus")} variant="secondary">
-              <MessageCircle className="h-4 w-4" />
-              Telegram
-            </Button>
-          </Toolbar>
+            </Toolbar>
         </CardContent>
       </Panel>
       <Panel>
@@ -4494,7 +4474,7 @@ function RelayProfileEditor({
       {showApiFields && profile.protocol === "chatCompletions" ? (
         <div className="hint-line relay-protocol-hint">
           <MessageCircle className="h-4 w-4" />
-          <span>{t("此上游会通过本地 127.0.0.1:57321 转成 Responses API，需要从 Codex++ 启动 Codex。")}</span>
+          <span>{t("此上游会通过本地 127.0.0.1:57321 转成 Responses API，需要从 AgentDesk 启动 Codex。")}</span>
         </div>
       ) : null}
       <div className="hint-line relay-protocol-hint">
@@ -5269,8 +5249,8 @@ function PendingProviderImportDialog({
       <div className="modal-card provider-import-modal">
         <div className="modal-head">
           <div>
-            <h2>{t("导入 Codex++ 供应商")}</h2>
-            <p>{t("检测到来自网页的供应商配置导入请求，确认后会写入本机 Codex++ 管理工具。")}</p>
+            <h2>{t("导入 AgentDesk 供应商")}</h2>
+            <p>{t("检测到来自网页的供应商配置导入请求，确认后会写入本机 AgentDesk 管理工具。")}</p>
           </div>
           <button className="toast-close" onClick={onDismiss} type="button">×</button>
         </div>
@@ -5454,7 +5434,7 @@ function routeSubtitle(route: Route) {
     enhance: t("会话删除、导出、项目移动和脚本能力"),
     zedRemote: t("管理 Codex SSH 项目并加入 Zed workspace"),
     userScripts: t("内置和用户自定义脚本清单"),
-    recommendations: t("赞助商推荐与普通推荐"),
+    recommendations: t("二狗子中转推荐"),
     maintenance: t("入口安装、修复、Watcher 与手动启动"),
     about: t("版本信息、项目链接、GitHub Release 更新、日志与诊断"),
     settings: t("主题和启动参数"),
@@ -6112,7 +6092,7 @@ function healthItems(overview: OverviewResult | null) {
       title: t("静默启动入口"),
       status: overview?.silent_shortcut.status ?? "not_checked",
       ok: overview?.silent_shortcut.status === "installed",
-      detail: overview?.silent_shortcut.path || t("缺少 Codex++ 静默启动快捷方式时可在安装维护页修复。"),
+      detail: overview?.silent_shortcut.path || t("缺少 AgentDesk 静默启动快捷方式时可在安装维护页修复。"),
     },
     {
       title: t("管理工具入口"),
@@ -6523,7 +6503,7 @@ function applyRelayProfilePatchToFiles(
   }
 
   if ("model" in patch) {
-    // 模型后缀（如 [1M]）仅供 CodexPlusPlus 内部使用，写入 config.toml 前需剥离，
+    // 模型后缀（如 [1M]）仅供 AgentDesk 内部使用，写入 config.toml 前需剥离，
     // 否则 codex 会按带后缀的字符串去匹配 catalog slug，导致窗口回退到默认值。
     const { slug } = parseModelSuffix(patch.model || "");
     next.configContents = setRootTomlStringKey(next.configContents, "model", slug);

@@ -765,7 +765,7 @@
       /* Dark theme overrides for delete-confirm and project-move dialogs.
          Triggered either by Codex applying a "dark" class / data-theme="dark"
          on its document root, or by the OS-level prefers-color-scheme hint.
-         Palette matches the existing Codex++ dark modal (.codex-plus-modal-content). */
+         Palette matches the existing AgentDesk dark modal (.codex-plus-modal-content). */
       html.dark .codex-delete-confirm-overlay,
       html[data-theme="dark"] .codex-delete-confirm-overlay,
       :root[data-theme="dark"] .codex-delete-confirm-overlay {
@@ -2180,7 +2180,7 @@
       label.dataset.codexPlusTriggerLabel = "true";
       trigger.appendChild(label);
     }
-    label.textContent = `Codex++ ${codexPlusVersion}`;
+    label.textContent = `AgentDesk ${codexPlusVersion}`;
   }
 
   function ensureCodexPlusTriggerIndicator(trigger) {
@@ -2200,7 +2200,7 @@
     if (codexPlusBackendStatus.version) {
       codexPlusVersion = codexPlusBackendStatus.version;
       document.querySelectorAll("[data-codex-plus-version]").forEach((node) => {
-        node.textContent = `Codex++ ${codexPlusVersion}`;
+        node.textContent = `AgentDesk ${codexPlusVersion}`;
       });
       document.querySelectorAll(`#${codexPlusMenuId} button`).forEach(setCodexPlusTriggerLabel);
     }
@@ -2335,49 +2335,19 @@
   function renderCodexPlusAds() {
     if (!codexPlusAdsLoaded) return `<div class="codex-plus-ad-empty">推荐内容加载中…</div>`;
     if (!codexPlusAds.length) return `<div class="codex-plus-ad-empty">暂无推荐内容。</div>`;
+    const sponsors = renderCodexPlusAdGroup("sponsor", "暂无中转推荐。");
     return `
       <section class="codex-plus-ad-section">
-        <h3 class="codex-plus-ad-section-title">赞助商推荐</h3>
-        <div class="codex-plus-ad-list">${renderCodexPlusAdGroup("sponsor", "暂无赞助商推荐。")}</div>
-      </section>
-      <section class="codex-plus-ad-section">
-        <h3 class="codex-plus-ad-section-title">普通推荐</h3>
-        <div class="codex-plus-ad-list">${renderCodexPlusAdGroup("normal", "暂无普通推荐。")}</div>
+        <h3 class="codex-plus-ad-section-title">中转推荐</h3>
+        <div class="codex-plus-ad-list">${sponsors}</div>
       </section>
     `;
-  }
-
-  function cacheBustCodexPlusAdUrl(url, version) {
-    return `${url}${url.includes("?") ? "&" : "?"}v=${version}`;
-  }
-
-  async function directFetchCodexPlusAds() {
-    const urls = [
-      "https://raw.githubusercontent.com/BigPizzaV3/Ad-List/main/ads.json",
-      "https://cdn.jsdelivr.net/gh/BigPizzaV3/Ad-List@main/ads.json",
-    ];
-    let lastError = null;
-    const cacheBust = Date.now();
-    for (const url of urls) {
-      try {
-        const response = await fetch(cacheBustCodexPlusAdUrl(url, cacheBust), {
-          headers: { "Accept": "application/json" },
-          cache: "no-store",
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return await response.json();
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    throw lastError || new Error("ad list unavailable");
   }
 
   async function fetchCodexPlusAds() {
     try {
       const localPayload = await postJson(codexPlusAdsUrl, {});
       codexPlusAds = normalizeCodexPlusAds(localPayload?.ads ? localPayload : localPayload?.payload);
-      if (!codexPlusAds.length) codexPlusAds = normalizeCodexPlusAds(await directFetchCodexPlusAds());
     } catch (error) {
       sendCodexPlusDiagnostic("ads_fetch_failed", {
         errorName: error?.name || "",
@@ -2410,16 +2380,15 @@
     const overlay = document.createElement("div");
     overlay.className = "codex-plus-modal-overlay";
     overlay.innerHTML = `
-      <div class="codex-plus-modal-content" role="dialog" aria-modal="true" aria-label="Codex++">
+      <div class="codex-plus-modal-content" role="dialog" aria-modal="true" aria-label="AgentDesk">
         <div class="codex-plus-modal-header">
-          <div class="codex-plus-modal-title"><span class="codex-plus-backend-indicator" data-codex-backend-indicator="true" data-status="checking"></span><span data-codex-plus-version="true">Codex++ ${codexPlusVersion}</span></div>
+          <div class="codex-plus-modal-title"><span class="codex-plus-backend-indicator" data-codex-backend-indicator="true" data-status="checking"></span><span data-codex-plus-version="true">AgentDesk ${codexPlusVersion}</span></div>
           <button type="button" class="codex-plus-modal-close" aria-label="关闭">×</button>
         </div>
-        <div class="codex-plus-tabs" role="tablist" aria-label="Codex++">
+        <div class="codex-plus-tabs" role="tablist" aria-label="AgentDesk">
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="home" data-active="true">主页</button>
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="userScripts" data-active="false">用户脚本</button>
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="sponsor" data-active="false">推荐内容</button>
-          <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="support" data-active="false">请作者喝咖啡</button>
         </div>
         <div class="codex-plus-modal-body">
           <div class="codex-plus-panel" data-codex-plus-panel="home">
@@ -2522,7 +2491,7 @@
               <button type="button" class="codex-plus-action-button" data-codex-open-manager="true">打开管理工具</button>
             </div>
             <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">原生菜单栏位置</div><div class="codex-plus-row-description">把 Codex++ 菜单插入顶部原生菜单栏；默认关闭以避免页面重渲染冲突。</div></div>
+              <div><div class="codex-plus-row-title">原生菜单栏位置</div><div class="codex-plus-row-description">把 AgentDesk 菜单插入顶部原生菜单栏；默认关闭以避免页面重渲染冲突。</div></div>
               <button type="button" class="codex-plus-toggle" data-codex-plus-setting="nativeMenuPlacement"><span></span></button>
             </div>
             <div class="codex-plus-row">
@@ -2530,17 +2499,9 @@
               <button type="button" class="codex-plus-action-button" data-codex-open-devtools="true">打开 DevTools</button>
             </div>
             <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">关于 Codex++</div><div class="codex-plus-about">Codex++ 是通过外部 launcher 注入的增强菜单，不修改 Codex App 原始安装文件。<br>Build: <span data-codex-plus-build="true">${codexPlusBuild}</span><br>GitHub: <a href="https://github.com/BigPizzaV3/CodexPlusPlus" target="_blank" rel="noreferrer">https://github.com/BigPizzaV3/CodexPlusPlus</a><br>Discord: <a href="https://discord.gg/y96kX7A76v" target="_blank" rel="noreferrer">https://discord.gg/y96kX7A76v</a><br>Telegram: <a href="https://t.me/CodexPlusPlus" target="_blank" rel="noreferrer">https://t.me/CodexPlusPlus</a></div></div>
+              <div><div class="codex-plus-row-title">关于 AgentDesk</div><div class="codex-plus-about">AgentDesk 是通过外部 launcher 注入的增强菜单，不修改 Codex App 原始安装文件。<br>Build: <span data-codex-plus-build="true">${codexPlusBuild}</span><br>GitHub: <a href="https://github.com/xxloocee/AgentDesk" target="_blank" rel="noreferrer">https://github.com/xxloocee/AgentDesk</a></div></div>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">Discord 社区</div><div class="codex-plus-row-description">加入 Discord 获取更新消息、反馈问题或交流使用体验。</div></div>
-              <button type="button" class="codex-plus-action-button" data-codex-plus-discord="true">打开 Discord</button>
-            </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">Telegram 频道</div><div class="codex-plus-row-description">加入 Telegram 获取更新消息和交流使用体验。</div></div>
-              <button type="button" class="codex-plus-action-button" data-codex-plus-telegram="true">打开 Telegram</button>
-            </div>
-            <div class="codex-plus-row">
+                                    <div class="codex-plus-row">
               <div><div class="codex-plus-row-title">提出问题</div><div class="codex-plus-row-description">打开 GitHub Issues 反馈问题或建议。</div></div>
               <button type="button" class="codex-plus-issue-button" data-codex-plus-issue="true">提出问题</button>
             </div>
@@ -2550,7 +2511,7 @@
               <div>
                 <div class="codex-plus-row-title">用户脚本</div>
                 <div class="codex-plus-row-description">启用用户脚本：自动加载内置目录和用户配置目录中的 .js 文件。</div>
-                <div class="codex-plus-user-script-warning">禁用后需重载页面或重启 Codex++ 才能完全移除已执行效果。</div>
+                <div class="codex-plus-user-script-warning">禁用后需重载页面或重启 Codex 才能完全移除已执行效果。</div>
                 <div class="codex-plus-user-script-dirs" data-codex-user-script-dirs="true">正在读取脚本目录…</div>
                 <div class="codex-plus-user-script-list" data-codex-user-script-list="true">正在读取用户脚本…</div>
               </div>
@@ -2561,22 +2522,9 @@
             </div>
           </div>
           <div class="codex-plus-panel" data-codex-plus-panel="sponsor" hidden>
-            <div class="codex-plus-sponsor-text">推荐内容分为赞助商推荐和普通推荐。赞助商推荐来自支持 Codex++ 继续维护的合作方；普通推荐用于展示适合 Codex 用户的服务与信息。</div>
+            <div class="codex-plus-sponsor-text">Ergouzi 二狗子模型中转服务，支持 OpenAI、Claude、Grok 兼容接口。</div>
             <div class="codex-plus-ad-remote">
               ${renderCodexPlusAds()}
-            </div>
-          </div>
-          <div class="codex-plus-panel" data-codex-plus-panel="support" hidden>
-            <div class="codex-plus-sponsor-text">如果 Codex++ 帮到了你，可以请我喝杯咖啡，或者随手赞赏支持一下继续维护。</div>
-            <div class="codex-plus-sponsor-grid">
-              <div class="codex-plus-sponsor-card">
-                <div class="codex-plus-sponsor-card-title">支付宝</div>
-                <img class="codex-plus-sponsor-qr" src="${window.__CODEX_PLUS_SPONSOR_IMAGES__?.alipay || `${helperBase}/assets/sponsor-alipay.jpg`}" alt="支付宝赞赏码">
-              </div>
-              <div class="codex-plus-sponsor-card">
-                <div class="codex-plus-sponsor-card-title">微信</div>
-                <img class="codex-plus-sponsor-qr" src="${window.__CODEX_PLUS_SPONSOR_IMAGES__?.wechat || `${helperBase}/assets/sponsor-wechat.jpg`}" alt="微信赞赏码">
-              </div>
             </div>
           </div>
         </div>
@@ -2621,17 +2569,9 @@
         openManagerFromCodex();
         return;
       }
-      if (target?.closest("[data-codex-plus-discord]")) {
-        window.open("https://discord.gg/y96kX7A76v", "_blank");
-        return;
-      }
-      if (target?.closest("[data-codex-plus-telegram]")) {
-        window.open("https://t.me/CodexPlusPlus", "_blank");
-        return;
-      }
       const issueButton = target?.closest("[data-codex-plus-issue]");
       if (issueButton) {
-        const issueUrl = "https://github.com/BigPizzaV3/CodexPlusPlus/issues";
+        const issueUrl = "https://github.com/xxloocee/AgentDesk/issues";
         window.open(issueUrl, "_blank");
         return;
       }
@@ -2753,7 +2693,7 @@
       if (node !== keep) node.remove();
     });
     Array.from(document.querySelectorAll("button")).forEach((button) => {
-      if ((button.textContent || "").trim() === `Codex++ ${codexPlusVersion}` && !button.closest(`#${codexPlusMenuId}`)) {
+      if ((button.textContent || "").trim() === `AgentDesk ${codexPlusVersion}` && !button.closest(`#${codexPlusMenuId}`)) {
         button.remove();
       }
     });
@@ -2922,11 +2862,11 @@
   }
 
   function displayNameForPluginMarketplaceName(name, fallback) {
-    if (name === "openai-bundled") return "OpenAI插件1(Codex++)";
-    if (name === "openai-curated") return "OpenAI插件2(Codex++)";
-    if (name === "openai-primary-runtime") return "OpenAI插件3(Codex++)";
-    if (name === "openai-api-curated") return "OpenAI插件4(Codex++)";
-    if (name === "openai-curated-remote") return "OpenAI插件5(Codex++)";
+    if (name === "openai-bundled") return "OpenAI插件1(AgentDesk)";
+    if (name === "openai-curated") return "OpenAI插件2(AgentDesk)";
+    if (name === "openai-primary-runtime") return "OpenAI插件3(AgentDesk)";
+    if (name === "openai-api-curated") return "OpenAI插件4(AgentDesk)";
+    if (name === "openai-curated-remote") return "OpenAI插件5(AgentDesk)";
     return fallback;
   }
 
@@ -6807,7 +6747,7 @@
     if (!trigger) return false;
     const payload = upstreamWorktreePayloadFromSelection(trigger) || upstreamWorktreeNativePayloadFromElement(trigger);
     if (!payload) {
-      showToast("无法安全识别 Codex 原生 worktree 表单，请使用 Codex++ 菜单创建。", null);
+      showToast("无法安全识别 Codex 原生 worktree 表单，请使用 AgentDesk 菜单创建。", null);
       return false;
     }
     event.preventDefault();
@@ -8812,9 +8752,9 @@
   window.__codexSessionDeleteObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
 })();
 
-// === 粘贴修复 (CodexPlusPlus 页面增强) ===
+// === 粘贴修复 (AgentDesk 页面增强) ===
 // 控制开关：window.__CODEX_PLUS_PASTE_FIX__ = { enabled: <bool> }
-// 由 CodexPlusPlus 在启动时根据 settings.codexAppPasteFix 注入。
+// 由 AgentDesk 在启动时根据 settings.codexAppPasteFix 注入。
 // 关闭时不进入 if 体，行为与原 Codex 完全一致；开启时在 document 捕获阶段
 // 拦截 paste，若 text/plain 非空则阻止默认行为并调用 execCommand('insertText')
 // 插入纯文本，避免 Codex 把 Word 复制的内容识别为附件。

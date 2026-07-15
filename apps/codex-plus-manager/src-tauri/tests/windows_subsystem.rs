@@ -104,7 +104,7 @@ fn windows_binaries_request_administrator_privileges_in_release_and_run_normally
         .and_then(std::path::Path::parent)
         .and_then(std::path::Path::parent)
         .unwrap()
-        .join("scripts/installer/windows/CodexPlusPlus.nsi");
+        .join("scripts/installer/windows/AgentDesk.nsi");
     let windows_installer =
         std::fs::read_to_string(&windows_installer).expect("read windows installer");
 
@@ -150,6 +150,30 @@ fn manager_launch_button_spawns_silent_launcher_binary() {
 }
 
 #[test]
+fn manager_restart_reports_success_only_after_new_codex_process_is_detected() {
+    let commands_rs =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
+            .expect("read manager commands.rs");
+    let watcher_rs = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .unwrap()
+            .join("crates/codex-plus-core/src/watcher.rs"),
+    )
+    .expect("read watcher.rs");
+
+    assert!(commands_rs.contains("stop_launcher_processes_and_wait()"));
+    assert!(commands_rs.contains("stop_codex_processes_and_wait()"));
+    assert!(commands_rs.contains("wait_for_codex_process_start("));
+    assert!(commands_rs.contains("Codex 已成功重启。"));
+    assert!(!commands_rs.contains("let _ = spawn_silent_launcher(&request);"));
+    assert!(watcher_rs.contains("-> anyhow::Result<()>"));
+    assert!(watcher_rs.contains("当前平台暂不支持重启 Codex"));
+}
+
+#[test]
 fn macos_packager_hides_silent_launcher_but_not_manager() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let packager = manifest_dir
@@ -163,12 +187,12 @@ fn macos_packager_hides_silent_launcher_but_not_manager() {
     assert!(script.contains("<key>LSUIElement</key>"));
     assert!(script.contains("ARCH=\"${2:-$(uname -m)}\""));
     assert!(script.contains("BINARY_DIR=\"${BINARY_DIR:-$ROOT/target/release}\""));
-    assert!(script.contains("CodexPlusPlus-${VERSION}-macos-${ARCH}.dmg"));
+    assert!(script.contains("AgentDesk-${VERSION}-macos-${ARCH}.dmg"));
     assert!(script.contains(
-        "create_app \"Codex++\" \"CodexPlusPlus\" \"$BINARY_DIR/codex-plus-plus\" \"com.bigpizzav3.codexplusplus\" \"true\""
+        "create_app \"AgentDesk\" \"AgentDesk\" \"$BINARY_DIR/codex-plus-plus\" \"com.xxloocee.agentdesk\" \"true\""
     ));
     assert!(script.contains(
-        "create_app \"Codex++ 管理工具\" \"CodexPlusPlusManager\" \"$BINARY_DIR/codex-plus-plus-manager\" \"com.bigpizzav3.codexplusplus.manager\" \"false\""
+        "create_app \"AgentDesk 管理工具\" \"AgentDeskManager\" \"$BINARY_DIR/codex-plus-plus-manager\" \"com.xxloocee.agentdesk.manager\" \"false\""
     ));
 }
 

@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind mobile relay server on {bind}"))?;
     let local_addr = listener.local_addr()?;
-    println!("Codex++ mobile relay listening on ws://{local_addr}");
+    println!("AgentDesk mobile relay listening on ws://{local_addr}");
     println!(
         "Clients must send first message: {{\"type\":\"register\",\"role\":\"host|client\",\"room\":\"...\",\"token\":\"...\"}}"
     );
@@ -556,7 +556,7 @@ fn relay_test_page() -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Codex++ Mobile Relay</title>
+  <title>AgentDesk Mobile Relay</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #15171a; }
@@ -577,7 +577,7 @@ fn relay_test_page() -> String {
 </head>
 <body>
 <main>
-  <h1>Codex++ Mobile Relay</h1>
+  <h1>AgentDesk Mobile Relay</h1>
   <section>
     <div class="row">
       <label>角色
@@ -677,7 +677,7 @@ fn mobile_relay_page() -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Codex++ 手机控制</title>
+  <title>AgentDesk 手机控制</title>
   <style>
     * { box-sizing: border-box; }
     :root { --bg: #f6f7f8; --panel: #fff; --line: #d8dde3; --text: #101418; --muted: #69727d; --accent: #0f766e; --danger: #b42318; --bubble-user: #e7f4f1; --bubble-agent: #fff; }
@@ -734,7 +734,7 @@ fn mobile_relay_page() -> String {
 </head>
 <body>
 <div class="app">
-  <header class="topbar"><strong class="title">Codex++</strong><span id="status" class="status">待连接</span></header>
+  <header class="topbar"><strong class="title">AgentDesk</strong><span id="status" class="status">待连接</span></header>
   <main class="layout">
     <section id="sessionsPane" class="sessions">
       <div class="connect">
@@ -874,7 +874,7 @@ async function ensureAppServer() {
     pending.set(id, { resolve, reject });
     setTimeout(() => { if (pending.delete(id)) reject(new Error("app-server 连接超时")); }, 30000);
   });
-  await rpcRaw("initialize", { clientInfo: { name: "Codex++ Mobile Relay", version: "1.0.0" }, capabilities: { experimentalApi: true } });
+  await rpcRaw("initialize", { clientInfo: { name: "AgentDesk Mobile Relay", version: "1.0.0" }, capabilities: { experimentalApi: true } });
 }
 async function rpc(method, params = {}) {
   await ensureAppServer();

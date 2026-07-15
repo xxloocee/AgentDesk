@@ -442,9 +442,75 @@ pub fn launch_codex_plus(request: LaunchRequest) -> CommandResult<Value> {
 
 #[tauri::command]
 pub fn restart_codex_plus(request: LaunchRequest) -> CommandResult<Value> {
-    codex_plus_core::watcher::stop_launcher_processes_and_wait();
-    codex_plus_core::watcher::stop_codex_processes_and_wait();
-    spawn_codex_plus_launch(request, "Codex 已请求重启，启动任务正在后台运行。")
+    let debug_port = request.debug_port;
+    let helper_port = request.helper_port;
+    let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+        "manager.restart_requested",
+        json!({
+            "debug_port": debug_port,
+            "helper_port": helper_port,
+            "app_path": request.app_path.trim()
+        }),
+    );
+
+    if let Err(error) = codex_plus_core::watcher::stop_launcher_processes_and_wait() {
+        return failed(
+            &format!("重启 Codex 失败：无法停止旧启动器：{error}"),
+            json!({ "stage": "stop_launcher", "debugPort": debug_port, "helperPort": helper_port }),
+        );
+    }
+    if let Err(error) = codex_plus_core::watcher::stop_codex_processes_and_wait() {
+        return failed(
+            &format!("重启 Codex 失败：无法停止旧 Codex：{error}"),
+            json!({ "stage": "stop_codex", "debugPort": debug_port, "helperPort": helper_port }),
+        );
+    }
+
+    let mut launcher = match spawn_silent_launcher(&request) {
+        Ok(launcher) => launcher,
+        Err(error) => {
+            return failed(
+                &format!("重启 Codex 失败：{error}"),
+                json!({ "stage": "start_launcher", "debugPort": debug_port, "helperPort": helper_port }),
+            );
+        }
+    };
+    let process_ids = codex_plus_core::watcher::wait_for_codex_process_start(
+        codex_plus_core::watcher::RESTART_START_WAIT_TIMEOUT_MS,
+        100,
+    );
+    if process_ids.is_empty() {
+        let launcher_state = match launcher.try_wait() {
+            Ok(Some(status)) => format!("静默启动器已退出（{status}）"),
+            Ok(None) => "静默启动器仍在运行".to_string(),
+            Err(error) => format!("无法读取静默启动器状态：{error}"),
+        };
+        let message = format!(
+            "重启 Codex 失败：{} 毫秒内未检测到新的 Codex 进程，{launcher_state}。",
+            codex_plus_core::watcher::RESTART_START_WAIT_TIMEOUT_MS
+        );
+        let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+            "manager.restart_failed",
+            json!({ "reason": message, "stage": "wait_for_codex" }),
+        );
+        return failed(
+            &message,
+            json!({ "stage": "wait_for_codex", "debugPort": debug_port, "helperPort": helper_port }),
+        );
+    }
+
+    let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+        "manager.restart_succeeded",
+        json!({ "process_ids": process_ids }),
+    );
+    ok(
+        "Codex 已成功重启。",
+        json!({
+            "debugPort": debug_port,
+            "helperPort": helper_port,
+            "processIds": process_ids
+        }),
+    )
 }
 
 fn spawn_codex_plus_launch(request: LaunchRequest, accepted_message: &str) -> CommandResult<Value> {
@@ -459,7 +525,7 @@ fn spawn_codex_plus_launch(request: LaunchRequest, accepted_message: &str) -> Co
         }),
     );
     match spawn_silent_launcher(&request) {
-        Ok(()) => CommandResult {
+        Ok(_) => CommandResult {
             status: "accepted".to_string(),
             message: accepted_message.to_string(),
             payload: json!({
@@ -477,7 +543,7 @@ fn spawn_codex_plus_launch(request: LaunchRequest, accepted_message: &str) -> Co
     }
 }
 
-fn spawn_silent_launcher(request: &LaunchRequest) -> anyhow::Result<()> {
+fn spawn_silent_launcher(request: &LaunchRequest) -> anyhow::Result<std::process::Child> {
     let launcher = codex_plus_core::install::companion_binary_path(SILENT_BINARY);
     let mut command = std::process::Command::new(&launcher);
     if !request.app_path.trim().is_empty() {
@@ -495,7 +561,6 @@ fn spawn_silent_launcher(request: &LaunchRequest) -> anyhow::Result<()> {
     }
     command
         .spawn()
-        .map(|_| ())
         .map_err(|error| anyhow::anyhow!("无法启动 {}：{error}", launcher.to_string_lossy()))
 }
 
@@ -3147,14 +3212,14 @@ fn default_user_script_manager() -> UserScriptManager {
 fn user_scripts_config_dir() -> PathBuf {
     if cfg!(windows) {
         if let Some(roaming) = std::env::var_os("APPDATA") {
-            return PathBuf::from(roaming).join("Codex++");
+            return PathBuf::from(roaming).join("AgentDesk");
         }
     }
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("Codex++")
+        .join("AgentDesk")
 }
 
 fn builtin_user_scripts_dir() -> PathBuf {

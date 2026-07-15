@@ -50,8 +50,9 @@ fn injection_script_prefixes_helper_url_and_sponsor_images() {
     assert!(script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));
     assert!(script.contains("window.__CODEX_PLUS_VERSION__"));
     assert!(script.contains(codex_plus_core::version::VERSION));
-    assert!(script.contains("https://discord.gg/y96kX7A76v"));
-    assert!(script.contains("data-codex-plus-discord"));
+    let disabled_discord_url = format!("{}{}", "https://discord.gg/", "y96kX7A76v");
+    assert!(!script.contains(&disabled_discord_url));
+    assert!(script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));
 }
 
 #[test]
@@ -171,16 +172,14 @@ fn injection_script_marks_diagnostic_build_and_reports_script_loaded() {
 }
 
 #[test]
-fn injection_script_fetches_ads_without_bridge() {
+fn injection_script_loads_ads_only_from_local_backend() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("directFetchCodexPlusAds"));
-    assert!(script.contains("cacheBustCodexPlusAdUrl"));
-    assert!(script.contains("Date.now()"));
-    assert!(script.contains("BigPizzaV3/Ad-List"));
-    assert!(
-        !script.contains("codexPlusAds = normalizeCodexPlusAds(await postJson(\"/ads\", {}));")
-    );
+    assert!(script.contains("postJson(codexPlusAdsUrl, {})"));
+    assert!(!script.contains("directFetchCodexPlusAds"));
+    assert!(!script.contains("cacheBustCodexPlusAdUrl"));
+    let disabled_ad_list = concat!("Big", "PizzaV3/", "Ad-List");
+    assert!(!script.contains(&disabled_ad_list));
 }
 
 #[test]
@@ -422,7 +421,7 @@ fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
     assert!(
         !script.contains("if (name === \"openai-bundled\") return \"codex-plus-openai-bundled\"")
     );
-    assert!(script.contains("if (name === \"openai-bundled\") return \"OpenAI插件1(Codex++)\""));
+    assert!(script.contains("if (name === \"openai-bundled\") return \"OpenAI插件1(AgentDesk)\""));
 }
 
 #[test]
@@ -475,21 +474,23 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
         "next.remoteMarketplaceName = restorePluginMarketplaceName(next.remoteMarketplaceName)"
     ));
     assert!(!script.contains("marketplace.name = alias"));
-    assert!(script.contains("if (name === \"openai-curated\") return \"OpenAI插件2(Codex++)\""));
+    assert!(script.contains("if (name === \"openai-curated\") return \"OpenAI插件2(AgentDesk)\""));
     assert!(
-        script.contains("if (name === \"openai-primary-runtime\") return \"OpenAI插件3(Codex++)\"")
+        script
+            .contains("if (name === \"openai-primary-runtime\") return \"OpenAI插件3(AgentDesk)\"")
     );
     assert!(script.contains("restored === \"openai-api-curated\""));
     assert!(script.contains("restored === \"openai-curated-remote\""));
     assert!(
-        script.contains("if (name === \"openai-curated-remote\") return \"OpenAI插件5(Codex++)\"")
+        script
+            .contains("if (name === \"openai-curated-remote\") return \"OpenAI插件5(AgentDesk)\"")
     );
     assert!(script.contains(
         "if (name === \"codex-plus-openai-curated-remote\") return \"openai-curated-remote\""
     ));
-    assert!(script.contains("OpenAI插件1(Codex++)"));
-    assert!(script.contains("OpenAI插件2(Codex++)"));
-    assert!(script.contains("OpenAI插件3(Codex++)"));
+    assert!(script.contains("OpenAI插件1(AgentDesk)"));
+    assert!(script.contains("OpenAI插件2(AgentDesk)"));
+    assert!(script.contains("OpenAI插件3(AgentDesk)"));
     assert!(script.contains("method === \"install-plugin\""));
     assert!(script.contains("plugin_marketplace_response_expanded"));
     assert!(script.contains("plugin_build_flavor_filter_bypassed"));
