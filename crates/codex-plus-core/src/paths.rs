@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const APP_STATE_DIR: &str = ".codex-session-delete";
+const APP_STATE_DIR: &str = ".agentdesk";
 const SETTINGS_FILE: &str = "settings.json";
 const LATEST_STATUS_FILE: &str = "latest-status.json";
 const DIAGNOSTIC_LOG_FILE: &str = "codex-plus.log";
@@ -60,27 +60,27 @@ mod tests {
     fn default_settings_path_uses_app_state_directory() {
         let path = default_settings_path();
 
-        assert!(path.ends_with(".codex-session-delete/settings.json"));
+        assert!(path.ends_with(".agentdesk/settings.json"));
     }
 
     #[test]
     fn default_latest_status_path_uses_app_state_directory() {
         let path = default_latest_status_path();
 
-        assert!(path.ends_with(".codex-session-delete/latest-status.json"));
+        assert!(path.ends_with(".agentdesk/latest-status.json"));
     }
 
     #[test]
     fn default_diagnostic_log_path_uses_app_state_directory() {
         let path = default_diagnostic_log_path();
 
-        assert!(path.ends_with(".codex-session-delete/codex-plus.log"));
+        assert!(path.ends_with(".agentdesk/codex-plus.log"));
     }
 
     #[test]
     fn default_pending_provider_import_path_uses_app_state_directory() {
         let path = default_pending_provider_import_path();
 
-        assert!(path.ends_with(".codex-session-delete/pending-provider-import.json"));
+        assert!(path.ends_with(".agentdesk/pending-provider-import.json"));
     }
 }

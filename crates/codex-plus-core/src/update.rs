@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const DEFAULT_REPOSITORY: &str = "BigPizzaV3/CodexPlusPlus";
+pub const DEFAULT_REPOSITORY: &str = "xxloocee/AgentDesk";
 pub const DEFAULT_LATEST_JSON_URL: &str =
-    "https://github.com/BigPizzaV3/CodexPlusPlus/releases/latest/download/latest.json";
+    "https://github.com/xxloocee/AgentDesk/releases/latest/download/latest.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseAsset {
@@ -300,8 +300,7 @@ fn is_macos_native_arch_asset(name: &str) -> bool {
 }
 
 fn is_windows_installer_asset(name: &str) -> bool {
-    name.contains("codex")
-        && name.contains("plus")
+    is_agentdesk_or_legacy_codex_plus_asset(name)
         && (name.ends_with(".msi")
             || name.ends_with("-setup.exe")
             || name.ends_with("_setup.exe")
@@ -310,9 +309,11 @@ fn is_windows_installer_asset(name: &str) -> bool {
 }
 
 fn is_macos_installer_asset(name: &str) -> bool {
-    // Loose shape check; arch preference is handled by platform_asset_rank
-    // via is_macos_native_arch_asset.
-    name.contains("codex") && name.contains("plus") && name.ends_with(".dmg")
+    is_agentdesk_or_legacy_codex_plus_asset(name) && name.ends_with(".dmg")
+}
+
+fn is_agentdesk_or_legacy_codex_plus_asset(name: &str) -> bool {
+    name.contains("agentdesk") || (name.contains("codex") && name.contains("plus"))
 }
 
 pub fn launch_installer(path: &Path) -> anyhow::Result<()> {

@@ -15,8 +15,8 @@ fn windows_entrypoint_plan_contains_silent_and_manager_entrypoints() {
 
     let plan = build_windows_entrypoint_plan(&options);
 
-    assert!(plan.silent_shortcut.ends_with("Codex++.lnk"));
-    assert!(plan.manager_shortcut.ends_with("Codex++ 管理工具.lnk"));
+    assert!(plan.silent_shortcut.ends_with("AgentDesk.lnk"));
+    assert!(plan.manager_shortcut.ends_with("AgentDesk 管理工具.lnk"));
     assert_eq!(plan.launcher_path, "C:/Tools/codex-plus-plus.exe");
     assert_eq!(plan.manager_path, "C:/Tools/codex-plus-plus-manager.exe");
     assert_eq!(plan.silent_icon_path, "C:/Tools/codex-plus-plus.exe");
@@ -24,8 +24,7 @@ fn windows_entrypoint_plan_contains_silent_and_manager_entrypoints() {
         plan.manager_icon_path,
         "C:/Tools/codex-plus-plus-manager.exe"
     );
-    assert_eq!(plan.uninstall_key, "CodexPlusPlus");
-    assert_eq!(plan.legacy_uninstall_key, "Codex++");
+    assert_eq!(plan.uninstall_key, "AgentDesk");
     assert_eq!(
         plan.uninstaller_path.replace('\\', "/"),
         "C:/Tools/uninstall.exe"
@@ -55,8 +54,8 @@ fn windows_entrypoint_plan_can_request_owned_data_removal_without_shell_script()
 
     let plan = build_windows_entrypoint_plan(&options);
 
-    assert!(plan.silent_shortcut.ends_with("Codex++.lnk"));
-    assert!(plan.manager_shortcut.ends_with("Codex++ 管理工具.lnk"));
+    assert!(plan.silent_shortcut.ends_with("AgentDesk.lnk"));
+    assert!(plan.manager_shortcut.ends_with("AgentDesk 管理工具.lnk"));
     assert!(plan.remove_owned_data);
 }
 
@@ -64,21 +63,21 @@ fn windows_entrypoint_plan_can_request_owned_data_removal_without_shell_script()
 fn macos_bundle_metadata_contains_silent_and_manager_apps() {
     let options = InstallOptions {
         install_root: Some("/Applications".into()),
-        launcher_path: Some("/opt/Codex++/codex-plus-plus".into()),
-        manager_path: Some("/opt/Codex++/codex-plus-plus-manager".into()),
+        launcher_path: Some("/opt/AgentDesk/codex-plus-plus".into()),
+        manager_path: Some("/opt/AgentDesk/codex-plus-plus-manager".into()),
         remove_owned_data: false,
     };
 
     let silent = build_macos_app_bundle(&options, false);
     let manager = build_macos_app_bundle(&options, true);
 
-    assert!(silent.app_path.ends_with("Codex++.app"));
-    assert!(manager.app_path.ends_with("Codex++ 管理工具.app"));
-    assert!(silent.info_plist.contains("<string>Codex++</string>"));
+    assert!(silent.app_path.ends_with("AgentDesk.app"));
+    assert!(manager.app_path.ends_with("AgentDesk 管理工具.app"));
+    assert!(silent.info_plist.contains("<string>AgentDesk</string>"));
     assert!(
         manager
             .info_plist
-            .contains("<string>Codex++ 管理工具</string>")
+            .contains("<string>AgentDesk 管理工具</string>")
     );
     assert_eq!(
         silent.binary_target_name.as_deref(),
@@ -98,8 +97,14 @@ fn macos_bundle_metadata_contains_silent_and_manager_apps() {
 
 #[test]
 fn installer_exports_expected_two_entrypoint_names() {
-    assert_eq!(shortcut_names(), ("Codex++.lnk", "Codex++ 管理工具.lnk"));
-    assert_eq!(app_bundle_names(), ("Codex++.app", "Codex++ 管理工具.app"));
+    assert_eq!(
+        shortcut_names(),
+        ("AgentDesk.lnk", "AgentDesk 管理工具.lnk")
+    );
+    assert_eq!(
+        app_bundle_names(),
+        ("AgentDesk.app", "AgentDesk 管理工具.app")
+    );
 }
 
 #[test]
@@ -113,26 +118,26 @@ fn macos_dmg_includes_applications_shortcut_for_drag_install() {
 #[test]
 fn companion_binary_path_resolves_macos_silent_app_next_to_manager_app() {
     let manager_exe = std::path::Path::new(
-        "/Applications/Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager",
+        "/Applications/AgentDesk 管理工具.app/Contents/MacOS/AgentDeskManager",
     );
 
     let companion = companion_binary_path_from_exe(manager_exe, SILENT_BINARY);
 
     assert_eq!(
         companion,
-        std::path::PathBuf::from("/Applications/Codex++.app/Contents/MacOS/CodexPlusPlus")
+        std::path::PathBuf::from("/Applications/AgentDesk.app/Contents/MacOS/AgentDesk")
     );
     assert_ne!(
         companion,
         std::path::PathBuf::from(
-            "/Applications/Codex++ 管理工具.app/Contents/MacOS/codex-plus-plus"
+            "/Applications/AgentDesk 管理工具.app/Contents/MacOS/codex-plus-plus"
         )
     );
 }
 
 #[test]
 fn companion_binary_path_resolves_macos_manager_app_next_to_silent_app() {
-    let silent_exe = std::path::Path::new("/Applications/Codex++.app/Contents/MacOS/CodexPlusPlus");
+    let silent_exe = std::path::Path::new("/Applications/AgentDesk.app/Contents/MacOS/AgentDesk");
 
     let companion =
         companion_binary_path_from_exe(silent_exe, codex_plus_core::install::MANAGER_BINARY);
@@ -140,7 +145,7 @@ fn companion_binary_path_resolves_macos_manager_app_next_to_silent_app() {
     assert_eq!(
         companion,
         std::path::PathBuf::from(
-            "/Applications/Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager"
+            "/Applications/AgentDesk 管理工具.app/Contents/MacOS/AgentDeskManager"
         )
     );
 }
@@ -149,9 +154,9 @@ fn companion_binary_path_resolves_macos_manager_app_next_to_silent_app() {
 fn macos_bundle_does_not_wrap_the_bundle_executable_in_itself() {
     let options = InstallOptions {
         install_root: Some("/Applications".into()),
-        launcher_path: Some("/Applications/Codex++.app/Contents/MacOS/CodexPlusPlus".into()),
+        launcher_path: Some("/Applications/AgentDesk.app/Contents/MacOS/AgentDesk".into()),
         manager_path: Some(
-            "/Applications/Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager".into(),
+            "/Applications/AgentDesk 管理工具.app/Contents/MacOS/AgentDeskManager".into(),
         ),
         remove_owned_data: false,
     };
@@ -162,13 +167,13 @@ fn macos_bundle_does_not_wrap_the_bundle_executable_in_itself() {
     assert_eq!(
         silent.binary_source,
         Some(std::path::PathBuf::from(
-            "/Applications/Codex++.app/Contents/MacOS/CodexPlusPlus"
+            "/Applications/AgentDesk.app/Contents/MacOS/AgentDesk"
         ))
     );
     assert_eq!(
         manager.binary_source,
         Some(std::path::PathBuf::from(
-            "/Applications/Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager"
+            "/Applications/AgentDesk 管理工具.app/Contents/MacOS/AgentDeskManager"
         ))
     );
     assert!(silent.launch_script.contains("$DIR/codex-plus-plus"));

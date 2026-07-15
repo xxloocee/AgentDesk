@@ -328,7 +328,7 @@ where
             } else {
                 let degraded = launch_status(
                     "running_degraded",
-                    "Codex launched; Codex++ enhancements are still waiting for the page bridge.",
+                    "Codex launched; AgentDesk enhancements are still waiting for the page bridge.",
                     debug_port,
                     helper_port,
                     &app_dir,
@@ -342,7 +342,7 @@ where
         if !settings.enhancements_enabled || !injection_degraded {
             let status = launch_status(
                 "running",
-                "Codex++ launcher ready",
+                "AgentDesk launcher ready",
                 debug_port,
                 helper_port,
                 &app_dir,

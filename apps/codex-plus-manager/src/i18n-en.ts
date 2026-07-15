@@ -1,4 +1,4 @@
-// English translations for the Codex++ manager UI, keyed by the original
+// English translations for the AgentDesk manager UI, keyed by the original
 // Chinese source text. Generated keys live in tools/i18n-keys.json; run
 // `node tools/i18n-verify.mjs` to confirm this dictionary covers exactly that
 // set (no missing or stale entries). See src/i18n.ts for how these are used.
@@ -16,10 +16,8 @@ export const EN_PLAIN: Record<string, string> = {
   "Codex 意外停止": "Codex stopped unexpectedly",
   "Codex 版本": "Codex version",
   "Codex 目标": "Codex goals",
-  "Codex++ 官方中转站，主打稳定接入和划算价格，支持 GPT-5.6 全系列、Fable 5、Sonnet 5、GPT-5.5、GPT-5.4、Claude Opus 4.8、Claude Opus 4.7、gpt-image-2 等模型与图像能力。":
-    "The official Codex++ relay, built for stable access and good value, supporting the full GPT-5.6 family, Fable 5, Sonnet 5, GPT-5.5, GPT-5.4, Claude Opus 4.8, Claude Opus 4.7, gpt-image-2 and other models plus image capabilities.",
-  "Codex++ 导入": "Codex++ import",
-  "Codex++ 版本": "Codex++ version",
+  "AgentDesk 导入": "AgentDesk import",
+  "AgentDesk 版本": "AgentDesk version",
   "Codex增强": "Codex enhancements",
   "Codex增强模式": "Codex enhancement mode",
   "Debug 端口": "Debug port",
@@ -51,10 +49,11 @@ export const EN_PLAIN: Record<string, string> = {
   "TOML 配置体": "TOML config body",
   "Watcher 操作": "Watcher action",
   "Watcher 状态": "Watcher status",
-  "Watcher 用于保持 Codex++ 接管状态": "The watcher keeps Codex++ in control",
+  "Watcher 用于保持 AgentDesk 接管状态": "The watcher keeps AgentDesk in control",
   "Watcher 自动接管": "Watcher auto-takeover",
   "仅支持 V2 桌宠；不会修改宠物文件。将 V2 的 Computer Use 光标朝向动作映射到真实鼠标，V1 开启后安全不生效；拖拽、原生悬停或 Computer Use 活跃时自动让步。":
     "V2 pets only; pet files are never modified. Maps the V2 Computer Use cursor-look animation to the real mouse cursor. V1 pets safely remain unchanged, while dragging, native hover, and active Computer Use take priority.",
+  "Ergouzi 二狗子模型中转服务": "Ergouzi AI model relay service",
   "Zed 远程打开": "Zed remote open",
   "Zed 远程项目": "Zed remote projects",
   "Zed 项目记录": "Zed project history",
@@ -74,7 +73,6 @@ export const EN_PLAIN: Record<string, string> = {
   "上游协议": "Upstream protocol",
   "下载并运行安装包": "Download and run installer",
   "不写 API 文件": "Does not write API files",
-  "与 Codex 内插件菜单使用同一个远端广告源": "Uses the same remote ad source as the in-Codex plugin menu",
   "个": "",
   "个会话": " session(s)",
   "中国官方": "China official",
@@ -121,7 +119,7 @@ export const EN_PLAIN: Record<string, string> = {
   "供应商预设列表": "Provider preset list",
   "保存": "Save",
   "保存为默认路径": "Save as default path",
-  "保存到 Codex++ state，不改写 Zed settings。": "Saved to Codex++ state, does not modify Zed settings.",
+  "保存到 AgentDesk state，不改写 Zed settings。": "Saved to AgentDesk state, does not modify Zed settings.",
   "保存增强设置": "Save enhancement settings",
   "保存扩展项": "Save entry",
   "保存的应用路径": "Saved app path",
@@ -142,15 +140,13 @@ export const EN_PLAIN: Record<string, string> = {
   "入口管理": "Entrypoint management",
   "全选当前列表": "Select all in current list",
   "关于": "About",
-  "关于 Codex++": "About Codex++",
+  "关于 AgentDesk": "About AgentDesk",
   "关闭": "Off",
   "关闭后会停用删除、导出、项目移动、插件相关和菜单位置增强。":
     "When off, disables deletion, export, project move, plugin-related and menu placement enhancements.",
   "关闭后本工具不会在手动切换时写入 Codex 的 config.toml / auth.json；启动 Codex 时始终不会自动改这些文件。":
     "When off, this tool won't write Codex's config.toml / auth.json on manual switches; it never auto-modifies these files when launching Codex.",
   "兼容增强": "Compatible enhancement",
-  "内容来自 BigPizzaV3/Ad-List，分为赞助商推荐和普通推荐。":
-    "Content comes from BigPizzaV3/Ad-List, split into sponsor recommendations and regular recommendations.",
   "内置": "Built-in",
   "内置、手动和市场安装脚本；可在这里启停或删除用户脚本": "Built-in, manual and marketplace-installed scripts; enable, disable or delete user scripts here",
   "内置和用户自定义脚本清单": "Built-in and user-defined script inventory",
@@ -186,7 +182,7 @@ export const EN_PLAIN: Record<string, string> = {
   "包含版本、路径、设置和平台信息": "Includes version, paths, settings and platform info",
   "协议": "Protocol",
   "卸载入口": "Uninstall entrypoints",
-  "卸载时移除 Codex++ 托管数据": "Remove Codex++ managed data on uninstall",
+  "卸载时移除 AgentDesk 托管数据": "Remove AgentDesk managed data on uninstall",
   "历史会话修复": "Historical session repair",
   "历史会话修复失败，请查看错误提示后重试。": "Historical session repair failed. Check the error message and retry.",
   "历史会话修复进度": "Historical session repair progress",
@@ -210,7 +206,7 @@ export const EN_PLAIN: Record<string, string> = {
   "名称": "Name",
   "启动 Codex App 时追加到默认 CDP 参数后。留空则保持默认启动行为。":
     "Appended after the default CDP arguments when launching the Codex app. Leave empty to keep default launch behavior.",
-  "启动 Codex++": "Launch Codex++",
+  "启动 AgentDesk": "Launch AgentDesk",
   "启动任务": "Launch task",
   "启动前自动修复历史会话": "Auto-repair historical sessions before launch",
   "启动时通过本地主进程调试端口汉化 Codex 原生菜单；不修改安装包。需重启 Codex 才生效。":
@@ -251,14 +247,13 @@ export const EN_PLAIN: Record<string, string> = {
   "安装维护": "Install & maintenance",
   "完整增强": "Full enhancement",
   "官方": "Official",
-  "官方中转站": "Official relay",
   "官方混入 API Key": "Official mixed-in API Key",
   "官方混合 API 不应在 auth.json 中保存 OPENAI_API_KEY。请清理此供应商的 auth.json 后再切换。":
     "Official mixed API should not store OPENAI_API_KEY in auth.json. Clear this provider's auth.json before switching.",
   "官方登录": "Official login",
   "官方登录模式": "Official login mode",
   "对话居中宽度": "Centered conversation width",
-  "导入 Codex++ 供应商": "Import Codex++ provider",
+  "导入 AgentDesk 供应商": "Import AgentDesk provider",
   "尚未刷新": "Not refreshed yet",
   "尚未加载推荐内容": "Recommendations not loaded yet",
   "尚未检查 Codex 应用路径。": "Codex app path not checked yet.",
@@ -297,8 +292,8 @@ export const EN_PLAIN: Record<string, string> = {
   "应用路径留空时使用已保存路径；没有保存路径时使用自动探测": "When the app path is empty, the saved path is used; with no saved path, auto-detection is used",
   "应用路径覆盖": "App path override",
   "开启": "On",
-  "开启后，通过 Codex++ 启动 Codex 前自动整理一次旧对话的归属标记。":
-    "When on, tidies up ownership tags of old conversations once before launching Codex through Codex++.",
+  "开启后，通过 AgentDesk 启动 Codex 前自动整理一次旧对话的归属标记。":
+    "When on, tidies up ownership tags of old conversations once before launching Codex through AgentDesk.",
   "强制中文界面": "Force Chinese UI",
   "强制启用 Codex App 内置 zh-CN 语言包，避免 Statsig/VPN 不通时回退英文。需重启 Codex 才能完整生效。":
     "Forces the Codex app's built-in zh-CN language pack to avoid falling back to English when Statsig/VPN is unreachable. Requires restarting Codex to fully apply.",
@@ -306,6 +301,7 @@ export const EN_PLAIN: Record<string, string> = {
   "当前 provider": "current provider",
   "当前不会写入 Codex config.toml / auth.json。打开供应商配置总开关后再切换。":
     "Codex config.toml / auth.json won't be written right now. Turn on the provider configuration master switch before switching.",
+  "支持 OpenAI、Claude、Grok 兼容接口。": "Supports OpenAI, Claude, and Grok compatible APIs.",
   "当前为": "Currently ",
   "当前为兼容增强模式，插件市场解锁不会启用；其他页面功能仍可用。":
     "Currently in compatible enhancement mode; plugin marketplace unlock is not enabled, but other page features still work.",
@@ -336,13 +332,13 @@ export const EN_PLAIN: Record<string, string> = {
   "手动": "Manual",
   "手动启动": "Manual launch",
   "打开": "Open",
-  "打开 JOJO Code": "Open JOJO Code",
+  "打开二狗子": "Open Ergouzi",
   "打开关于": "Open About",
   "打开链接": "Open link",
   "打开项目主页": "Open project homepage",
   "扩展项": "entry",
   "批量删除会话": "Bulk delete sessions",
-  "把 Codex++ 菜单插入 Codex 顶部原生菜单栏。": "Insert the Codex++ menu into Codex's top native menu bar.",
+  "把 AgentDesk 菜单插入 Codex 顶部原生菜单栏。": "Insert the AgentDesk menu into Codex's top native menu bar.",
   "把主对话和输入框限制到固定最大宽度，适合大屏阅读。": "Constrain the main conversation and input box to a fixed max width, good for large-screen reading.",
   "把会话移动到普通对话或其他本地项目。": "Move a session to a regular conversation or another local project.",
   "投稿": "Submit",
@@ -357,9 +353,14 @@ export const EN_PLAIN: Record<string, string> = {
   "按请求轮转会逐请求切换成员，适合供应商能力接近的场景。":
     "Per-request round-robin switches members request by request, suited to providers with similar capabilities.",
   "接入模式": "Access mode",
+  "推荐中转": "Recommended relay",
   "推荐内容": "Recommendations",
   "提取当前供应商配置": "Extract current provider config",
   "插件": "Plugins",
+  "中转推荐": "Relay recommendations",
+  "二狗子中转推荐": "Ergouzi relay recommendation",
+  "统一的 AI 模型聚合与分发网关，支持 OpenAI、Claude、Grok 兼容接口。Codex 中转注入默认使用 https://ergouzi.life/v1。":
+    "A unified AI model aggregation and distribution gateway with OpenAI, Claude and Grok compatible APIs. Codex relay injection defaults to https://ergouzi.life/v1.",
   "插件列表全量展示": "Show full plugin list",
   "插件市场修复": "Plugin marketplace repair",
   "插件市场修复失败，请查看错误提示后重试。": "Plugin marketplace repair failed. Check the error message and retry.",
@@ -368,8 +369,8 @@ export const EN_PLAIN: Record<string, string> = {
   "官方远端插件缓存": "Official remote plugin cache",
   "官方远端插件缓存进度": "Official remote plugin cache progress",
   "官方远端插件缓存修复失败，请查看错误提示后重试。": "Official remote plugin cache repair failed. Check the error message and retry.",
-  "使用 Codex++ 内置快照补齐远端插件，API 模式也可显示和安装 Product Design 插件。":
-    "Use the embedded Codex++ snapshot to add remote plugins, so API mode can also show and install the Product Design plugin.",
+  "使用 AgentDesk 内置快照补齐远端插件，API 模式也可显示和安装 Product Design 插件。":
+    "Use the embedded AgentDesk snapshot to add remote plugins, so API mode can also show and install the Product Design plugin.",
   "搜索供应商…": "Search providers…",
   "数据库": "Database",
   "新增": "Add ",
@@ -384,14 +385,12 @@ export const EN_PLAIN: Record<string, string> = {
   "释放并注册内置缓存": "Extract and register embedded cache",
   "显示服务模式切换按钮；Fast 仅支持 gpt-5.4 / gpt-5.5，其他模型按 Standard 发送。":
     "Show the service-tier toggle button; Fast only supports gpt-5.4 / gpt-5.5, other models are sent as Standard.",
-  "普通推荐": "Regular recommendations",
   "暂无": "None",
   "暂无启动状态。": "No launch status yet.",
   "暂无描述。": "No description.",
   "暂无日志。": "No logs.",
-  "暂无普通推荐。": "No regular recommendations.",
   "暂无状态文件": "No status file",
-  "暂无赞助商推荐。": "No sponsor recommendations.",
+  "暂无中转推荐。": "No relay recommendations.",
   "暂无项目。": "No projects.",
   "更多选项": "More options",
   "更新": "Update",
@@ -414,8 +413,8 @@ export const EN_PLAIN: Record<string, string> = {
   "未检测到": "Not detected",
   "未检测到 Codex 应用版本。": "Codex app version not detected.",
   "未发现缓存": "Cache not found",
-  "未发现本地缓存；点击按钮会从 Codex++ 内置快照释放并注册，无需官方账号预缓存。":
-    "Local cache not found. Click the button to extract and register the embedded Codex++ snapshot; no official-account pre-cache is required.",
+  "未发现本地缓存；点击按钮会从 AgentDesk 内置快照释放并注册，无需官方账号预缓存。":
+    "Local cache not found. Click the button to extract and register the embedded AgentDesk snapshot; no official-account pre-cache is required.",
   "未知": "Unknown",
   "未知作者": "Unknown author",
   "未知来源": "Unknown source",
@@ -442,8 +441,8 @@ export const EN_PLAIN: Record<string, string> = {
   "诊断供应商": "Diagnose provider",
   "检测": "Detect",
   "检测到 OPENAI 环境变量": "OPENAI environment variables detected",
-  "检测到来自网页的供应商配置导入请求，确认后会写入本机 Codex++ 管理工具。":
-    "A provider config import request from the web was detected; confirming writes it to this machine's Codex++ manager.",
+  "检测到来自网页的供应商配置导入请求，确认后会写入本机 AgentDesk 管理工具。":
+    "A provider config import request from the web was detected; confirming writes it to this machine's AgentDesk manager.",
   "概览": "Overview",
   "概览只展示关键问题，具体配置在对应页面处理": "The overview shows only key issues; specific configuration is handled on the relevant pages",
   "概览已检查": "Overview checked",
@@ -468,8 +467,8 @@ export const EN_PLAIN: Record<string, string> = {
   "正在解压并校验插件文件…": "Extracting and verifying plugin files…",
   "正在连接 openai/plugins…": "Connecting to openai/plugins…",
   "正常": "OK",
-  "此上游会通过本地 127.0.0.1:57321 转成 Responses API，需要从 Codex++ 启动 Codex。":
-    "This upstream is converted to the Responses API via local 127.0.0.1:57321, which requires launching Codex from Codex++.",
+  "此上游会通过本地 127.0.0.1:57321 转成 Responses API，需要从 AgentDesk 启动 Codex。":
+    "This upstream is converted to the Responses API via local 127.0.0.1:57321, which requires launching Codex from AgentDesk.",
   "此供应商会保留官方登录模式，并把请求混入当前 API Key；Codex增强仍使用兼容模式。":
     "This provider keeps official login mode and mixes the current API Key into requests; Codex enhancements stay in compatible mode.",
   "此供应商会切回官方登录模式，使用 ChatGPT 官方账号，不写入 API Key。":
@@ -532,12 +531,12 @@ export const EN_PLAIN: Record<string, string> = {
   "纯 API 模式": "Pure API mode",
   "纯 API 配置未完整写入：请检查此供应商是否有 OPENAI_API_KEY，且 config.toml 是否包含 model_provider / provider / base_url。":
     "Pure API config is incomplete: check whether this provider has OPENAI_API_KEY and whether config.toml includes model_provider / provider / base_url.",
-  "维护 Codex++ 自己的远程项目最近列表。": "Maintain Codex++'s own recent list of remote projects.",
+  "维护 AgentDesk 自己的远程项目最近列表。": "Maintain AgentDesk's own recent list of remote projects.",
   "编辑": "Edit",
   "编辑后保存列表，再切换模式时会使用新配置": "After editing, save the list; the new config is used the next time you switch modes",
   "编辑扩展项": "Edit entry",
   "缺失": "Missing",
-  "缺少 Codex++ 静默启动快捷方式时可在安装维护页修复。": "When the Codex++ silent launch shortcut is missing, repair it on the Install & Maintenance page.",
+  "缺少 AgentDesk 静默启动快捷方式时可在安装维护页修复。": "When the AgentDesk silent launch shortcut is missing, repair it on the Install & Maintenance page.",
   "缺少管理工具快捷方式时可在安装维护页修复。": "When the manager shortcut is missing, repair it on the Install & Maintenance page.",
   "聚合": "Aggregate",
   "聚合/中转": "Aggregate/relay",
@@ -590,8 +589,6 @@ export const EN_PLAIN: Record<string, string> = {
   "读取 ~/.cc-switch/cc-switch.db": "Reading ~/.cc-switch/cc-switch.db",
   "调用失败": "Call failed",
   "资源": "Asset",
-  "赞助商推荐": "Sponsor recommendations",
-  "赞助商推荐与普通推荐": "Sponsor and regular recommendations",
   "输入中转服务的 API Key": "Enter the relay service API Key",
   "运行中": "Running",
   "返回列表": "Back to list",
@@ -620,7 +617,7 @@ export const EN_PLAIN: Record<string, string> = {
   "配置": "Config",
   "配置文件": "Config file",
   "配置模型": "Config model",
-  "重启 Codex++": "Restart Codex++",
+  "重启 Codex": "Restart Codex",
   "重新安装": "Reinstall",
   "重新生成": "Regenerate",
   "重置背景": "Reset background",
@@ -669,7 +666,7 @@ export const EN_TEMPLATE: Record<string, string> = {
   "{0} ms": "{0} ms",
   "{0} · {1} 个成员": "{0} · {1} member(s)",
   "{0} 个": "{0}",
-  "{0} 个 Codex++ 可识别项目，默认策略：{1}": "{0} project(s) recognized by Codex++, default strategy: {1}",
+  "{0} 个 AgentDesk 可识别项目，默认策略：{1}": "{0} project(s) recognized by AgentDesk, default strategy: {1}",
   "{0} 个供应商": "{0} provider(s)",
   "{0} 个供应商配置；可拖动排序，点编辑进入详情": "{0} provider configuration(s); drag to reorder, click edit for details",
   "{0} 个市场脚本，已安装 {1} 个，本地整体 {2}": "{0} marketplace script(s), {1} installed, local overall {2}",
@@ -690,8 +687,8 @@ export const EN_TEMPLATE: Record<string, string> = {
   "检测到 TUN 模式已开启，请在 Clash Verge Rev 中关闭。配置：{0}":
     "TUN mode is enabled. Disable it in Clash Verge Rev. Configuration: {0}",
   "TUN 模式已关闭。配置：{0}": "TUN mode is disabled. Configuration: {0}",
-  "检测到代理环境变量：{0}。请清理后重新启动 Codex++。":
-    "Proxy environment variables detected: {0}. Remove them and restart Codex++.",
+  "检测到代理环境变量：{0}。请清理后重新启动 AgentDesk。":
+    "Proxy environment variables detected: {0}. Remove them and restart AgentDesk.",
   "检测到可能干扰供应商配置的 .env 文件：{0}": "A .env file that may interfere with provider configuration was found: {0}",
   "未发现 .env 文件：{0}": "No .env file found: {0}",
   "官方登录已就绪：{0}，会混入当前 API Key。": "Official login ready: {0}, the current API Key will be mixed in.",

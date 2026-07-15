@@ -1,10 +1,6 @@
 {
   "brand": {
-    "appName": "AgentDesk",
     "managerNameZh": "AgentDesk 管理工具",
-    "managerNameEn": "AgentDesk Manager",
-    "providerId": "AgentDesk",
-    "publisher": "xxloocee",
     "bundleBase": "com.xxloocee.agentdesk",
     "stateDir": ".agentdesk"
   },
@@ -16,27 +12,18 @@
     "latestJson": "https://github.com/xxloocee/AgentDesk/releases/latest/download/latest.json"
   },
   "recommendations": {
-    "mode": "disabled",
-    "sourceLabel": "AgentDesk private recommendations",
-    "urls": []
+    "mode": "builtin-only"
   },
   "officialRelay": {
     "id": "ergouzi",
-    "name": "Ergouzi",
     "displayName": "Ergouzi 二狗子",
     "homeUrl": "https://ergouzi.life",
-    "docsUrl": "https://doc.ergouzi.life",
-    "baseUrl": "https://ergouzi.life/v1",
-    "defaultModel": "gpt-5.5"
+    "baseUrl": "https://ergouzi.life/v1"
   },
   "scriptMarket": {
     "enabled": true,
     "repositoryUrl": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
     "indexUrl": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/index.json"
-  },
-  "community": {
-    "discord": "",
-    "telegram": ""
   },
   "support": {
     "enabled": false

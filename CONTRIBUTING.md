@@ -1,85 +1,96 @@
-# Contributing to CodexPlusPlus
+# Contributing to AgentDesk
 
-Thank you for your interest in contributing to CodexPlusPlus!
+Thank you for your interest in contributing to AgentDesk.
 
 ## Development Setup
 
 1. **Clone the repository**
-   ```bash
-   git clone https://github.com/BigPizzaV3/CodexPlusPlus.git
-   cd CodexPlusPlus
-   ```
+
+```bash
+git clone https://github.com/xxloocee/AgentDesk.git
+cd AgentDesk
+```
 
 2. **Install Rust toolchain**
-   Ensure you have Rust 1.70+ installed:
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   rustc --version  # Should be 1.70+
-   ```
+
+Ensure you have Rust 1.85+ installed:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustc --version
+```
 
 3. **Build the project**
-   ```bash
-   cargo build --release
-   ```
+
+```bash
+cargo build --release
+```
 
 4. **Run tests**
-   ```bash
-   cargo test
-   ```
+
+```bash
+cargo test
+```
 
 ## Project Structure
 
-```
-CodexPlusPlus/
+```text
+AgentDesk/
+├── apps/
+│   ├── codex-plus-launcher/   # Silent launcher
+│   └── codex-plus-manager/    # Tauri manager UI
 ├── crates/
-│   ├── codex-plus-data/    # Data handling and provider sync
-│   └── codex-plus-core/    # Core Codex++ logic
-└── README.md               # Project documentation
+│   ├── codex-plus-core/       # Core launch / inject / config logic
+│   └── codex-plus-data/       # Session data and provider sync
+└── README.md
 ```
 
 ## Making Changes
 
-1. **Create a feature branch**
-   ```bash
-   git checkout -b feat/your-feature-name
-   ```
+1. Create a feature branch:
 
-2. **Make your changes**
-   - Write idiomatic Rust code
-   - Add tests for new functionality
-   - Update documentation as needed
+```bash
+git checkout -b feat/your-feature-name
+```
 
-3. **Run the test suite**
-   ```bash
-   cargo test --all-features
-   cargo clippy  # Linting
-   ```
+2. Make your changes:
+   - Prefer small, reviewable diffs
+   - Add tests for new behavior
+   - Update user-facing documentation when behavior changes
 
-4. **Commit your changes**
-   ```bash
-   git commit -m "feat: add your feature description"
-   ```
+3. Run checks:
+
+```bash
+cargo test --all-features
+cargo fmt --all -- --check
+cargo clippy
+```
+
+4. Commit with a clear message:
+
+```bash
+git commit -m "feat: add your feature description"
+```
 
 ## Code Style
 
 - Follow Rust standard formatting (`cargo fmt`)
 - Use `clippy` for linting recommendations
-- Write self-documenting code with clear variable/function names
+- Prefer clear names over clever abstractions
 - Add doc comments (`///`) for public APIs
 
 ## Pull Request Process
 
-1. Fork the repository
-2. Create your feature branch
-3. Make your changes with adequate tests
-4. Ensure all tests pass and clippy is clean
-5. Submit a pull request with a clear description
+1. Keep the PR focused on one change
+2. Include tests when behavior changes
+3. Describe the user-visible impact
 
 ## Reporting Issues
 
 - Use GitHub Issues for bug reports and feature requests
 - Include Rust version (`rustc --version`) and OS information
 - For bugs, provide minimal reproduction steps
+- Never paste real API keys, `auth.json`, or private config
 
 ## License
 

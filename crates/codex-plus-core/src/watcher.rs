@@ -12,6 +12,7 @@ pub const WATCHER_INTERVAL_SECONDS: f64 = 3.0;
 pub const CDP_PROBE_TIMEOUT_SECONDS: f64 = 0.5;
 pub const TAKEOVER_FAILURE_BACKOFF_SECONDS: f64 = 30.0;
 pub const RESTART_STOP_WAIT_TIMEOUT_MS: u64 = 5_000;
+pub const RESTART_START_WAIT_TIMEOUT_MS: u64 = 20_000;
 const RESTART_STOP_WAIT_INTERVAL_MS: u64 = 100;
 pub const WATCHER_RUN_NAME: &str = "CodexPlusPlusWatcher";
 pub const WATCHER_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -258,7 +259,7 @@ pub fn stop_launcher_processes() {
 pub fn stop_launcher_processes() {}
 
 #[cfg(windows)]
-pub fn stop_launcher_processes_and_wait() {
+pub fn stop_launcher_processes_and_wait() -> anyhow::Result<()> {
     let processes = crate::windows_integration::enumerate_processes();
     let killable = filter_killable_launcher_processes(
         processes.iter().map(|process| {
@@ -274,11 +275,13 @@ pub fn stop_launcher_processes_and_wait() {
         killable,
         RESTART_STOP_WAIT_TIMEOUT_MS,
         RESTART_STOP_WAIT_INTERVAL_MS,
-    );
+    )
 }
 
 #[cfg(not(windows))]
-pub fn stop_launcher_processes_and_wait() {}
+pub fn stop_launcher_processes_and_wait() -> anyhow::Result<()> {
+    anyhow::bail!("当前平台暂不支持重启 Codex")
+}
 
 #[cfg(windows)]
 pub fn stop_codex_processes() {
@@ -291,42 +294,88 @@ pub fn stop_codex_processes() {
 pub fn stop_codex_processes() {}
 
 #[cfg(windows)]
-pub fn stop_codex_processes_and_wait() {
+pub fn stop_codex_processes_and_wait() -> anyhow::Result<()> {
     terminate_and_wait_for_exit(
         find_codex_processes(),
         RESTART_STOP_WAIT_TIMEOUT_MS,
         RESTART_STOP_WAIT_INTERVAL_MS,
-    );
+    )
 }
 
 #[cfg(not(windows))]
-pub fn stop_codex_processes_and_wait() {}
+pub fn stop_codex_processes_and_wait() -> anyhow::Result<()> {
+    anyhow::bail!("当前平台暂不支持重启 Codex")
+}
 
 #[cfg(windows)]
-fn terminate_and_wait_for_exit(process_ids: Vec<u32>, timeout_ms: u64, interval_ms: u64) {
+fn terminate_and_wait_for_exit(
+    process_ids: Vec<u32>,
+    timeout_ms: u64,
+    interval_ms: u64,
+) -> anyhow::Result<()> {
     if process_ids.is_empty() {
-        return;
+        return Ok(());
     }
     for process_id in &process_ids {
         let _ = crate::windows_integration::terminate_process(*process_id);
     }
+    let remaining = wait_for_process_exit(
+        &process_ids,
+        || {
+            crate::windows_integration::enumerate_processes()
+                .into_iter()
+                .map(|process| process.process_id)
+                .collect()
+        },
+        timeout_ms,
+        interval_ms,
+    );
+    if remaining.is_empty() {
+        return Ok(());
+    }
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "watcher.stop_wait_timeout",
+        serde_json::json!({
+            "remaining_process_ids": remaining,
+            "timeout_ms": timeout_ms
+        }),
+    );
+    anyhow::bail!("进程未在 {} 毫秒内退出：{:?}", timeout_ms, remaining);
+}
+
+fn wait_for_process_exit(
+    expected: &[u32],
+    mut scan: impl FnMut() -> Vec<u32>,
+    timeout_ms: u64,
+    interval_ms: u64,
+) -> Vec<u32> {
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        let running_process_ids = crate::windows_integration::enumerate_processes()
-            .into_iter()
-            .map(|process| process.process_id);
-        let remaining = process_ids_still_running(&process_ids, running_process_ids);
+        let remaining = process_ids_still_running(expected, scan());
         if remaining.is_empty() || std::time::Instant::now() >= deadline {
-            if !remaining.is_empty() {
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "watcher.stop_wait_timeout",
-                    serde_json::json!({
-                        "remaining_process_ids": remaining,
-                        "timeout_ms": timeout_ms
-                    }),
-                );
-            }
-            break;
+            return remaining;
+        }
+        std::thread::sleep(Duration::from_millis(interval_ms));
+    }
+}
+
+pub fn wait_for_codex_process_start(timeout_ms: u64, interval_ms: u64) -> Vec<u32> {
+    wait_for_process_start(find_codex_processes, timeout_ms, interval_ms)
+}
+
+fn wait_for_process_start(
+    mut scan: impl FnMut() -> Vec<u32>,
+    timeout_ms: u64,
+    interval_ms: u64,
+) -> Vec<u32> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let process_ids = scan();
+        if !process_ids.is_empty() {
+            return process_ids;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Vec::new();
         }
         std::thread::sleep(Duration::from_millis(interval_ms));
     }
@@ -375,4 +424,55 @@ fn startup_shortcut_path() -> Option<PathBuf> {
             .join("Startup")
             .join(WATCHER_STARTUP_SHORTCUT_NAME)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{wait_for_process_exit, wait_for_process_start};
+
+    #[test]
+    fn wait_for_process_exit_returns_empty_after_processes_stop() {
+        let mut scans = 0;
+        let remaining = wait_for_process_exit(
+            &[10, 20],
+            || {
+                scans += 1;
+                if scans == 1 { vec![10, 20] } else { Vec::new() }
+            },
+            100,
+            0,
+        );
+
+        assert!(remaining.is_empty());
+        assert_eq!(scans, 2);
+    }
+
+    #[test]
+    fn wait_for_process_exit_returns_remaining_processes_after_timeout() {
+        assert_eq!(
+            wait_for_process_exit(&[10, 20], || vec![20], 0, 0),
+            vec![20]
+        );
+    }
+
+    #[test]
+    fn wait_for_process_start_returns_processes_after_retry() {
+        let mut scans = 0;
+        let process_ids = wait_for_process_start(
+            || {
+                scans += 1;
+                (scans == 2).then_some(vec![42]).unwrap_or_default()
+            },
+            100,
+            0,
+        );
+
+        assert_eq!(process_ids, vec![42]);
+        assert_eq!(scans, 2);
+    }
+
+    #[test]
+    fn wait_for_process_start_returns_empty_after_timeout() {
+        assert!(wait_for_process_start(Vec::new, 0, 0).is_empty());
+    }
 }
