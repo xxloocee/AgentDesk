@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -70,6 +70,12 @@ pub trait BridgeSettingsService: Send + Sync {
 #[async_trait]
 pub trait BridgeRuntimeService: Send + Sync {
     async fn user_script_inventory(&self) -> anyhow::Result<Value>;
+    async fn user_script_inventory_with_runtime_status(
+        &self,
+        _payload: Value,
+    ) -> anyhow::Result<Value> {
+        self.user_script_inventory().await
+    }
     async fn set_user_scripts_enabled(&self, enabled: bool) -> anyhow::Result<Value>;
     async fn set_user_script_enabled(&self, key: String, enabled: bool) -> anyhow::Result<Value>;
     async fn delete_user_script(&self, key: String) -> anyhow::Result<Value>;
@@ -132,7 +138,11 @@ pub async fn handle_bridge_request(
         "/settings/set" => {
             settings_value(&ctx, ctx.settings.set_settings(payload.clone()).await).await
         }
-        "/user-scripts/list" => ctx.runtime.user_script_inventory().await,
+        "/user-scripts/list" => {
+            ctx.runtime
+                .user_script_inventory_with_runtime_status(payload.clone())
+                .await
+        }
         "/user-scripts/set-enabled" => {
             let enabled = payload
                 .get("enabled")
@@ -440,14 +450,13 @@ impl BridgeRuntimeService for CoreRuntimeService {
     }
 
     async fn open_manager(&self) -> anyhow::Result<Value> {
-        let manager_path = manager_exe_path();
-        if !manager_path.exists() {
-            anyhow::bail!("未找到管理工具：{}", manager_path.display());
-        }
-        spawn_manager(&manager_path)?;
+        let target = crate::install::spawn_companion(
+            crate::install::MANAGER_BINARY,
+            std::iter::empty::<&str>(),
+        )?;
         Ok(json!({
             "status": "ok",
-            "path": manager_path.to_string_lossy()
+            "path": target
         }))
     }
 
@@ -599,23 +608,6 @@ impl BridgeDataService for UnavailableDataService {
             "sort_keys": []
         }))
     }
-}
-
-fn manager_exe_path() -> PathBuf {
-    crate::install::option_or_current_exe(&None, crate::install::MANAGER_BINARY)
-}
-
-fn spawn_manager(manager_path: &Path) -> anyhow::Result<()> {
-    let mut command = std::process::Command::new(manager_path);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(crate::windows_create_no_window());
-    }
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("启动管理工具失败：{error}"))
 }
 
 fn settings_payload_value(

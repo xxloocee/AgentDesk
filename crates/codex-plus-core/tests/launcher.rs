@@ -3,13 +3,12 @@ use std::sync::{Arc, Mutex};
 
 use codex_plus_core::app_paths::{
     build_codex_executable, codex_app_version, find_latest_codex_app_dir,
-    find_latest_codex_app_dir_from_roots, find_macos_codex_app,
-    latest_appx_install_location_from_output, normalize_codex_app_path, packaged_app_user_model_id,
-    resolve_codex_app_dir_with_saved, user_data_candidates_from,
+    find_latest_codex_app_dir_from_roots, find_macos_codex_app, normalize_codex_app_path,
+    packaged_app_user_model_id, resolve_codex_app_dir_with_saved, user_data_candidates_from,
 };
 use codex_plus_core::launcher::{
     CodexLaunch, DefaultLaunchHooks, LaunchHooks, LaunchOptions, MacosCleanupPolicy,
-    build_codex_arguments, build_codex_arguments_for_settings,
+    browser_identity_changed, build_codex_arguments, build_codex_arguments_for_settings,
     build_codex_arguments_with_native_menu_inspector, build_codex_command,
     build_codex_command_with_native_menu_inspector, build_macos_cleanup_command,
     build_macos_open_command, build_macos_open_command_with_native_menu_inspector,
@@ -23,6 +22,13 @@ use codex_plus_core::ports::{
 };
 use codex_plus_core::settings::{BackendSettings, RelayProfile, RelayProtocol};
 use codex_plus_core::status::StatusStore;
+
+#[test]
+fn browser_identity_change_requires_two_distinct_observations() {
+    assert!(!browser_identity_changed(None, "browser-a"));
+    assert!(!browser_identity_changed(Some("browser-a"), "browser-a"));
+    assert!(browser_identity_changed(Some("browser-a"), "browser-b"));
+}
 
 #[test]
 fn app_paths_find_latest_windows_package_prefers_highest_version_app_dir() {
@@ -134,6 +140,49 @@ fn app_paths_extracts_codex_version_from_windows_package_app_dir() {
     assert_eq!(
         codex_app_version(&app_dir).as_deref(),
         Some("26.513.3673.0")
+    );
+}
+
+#[test]
+fn app_paths_extracts_codex_version_from_portable_version_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("versions").join("current");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    std::fs::write(app_dir.join("Codex.exe"), "").unwrap();
+    std::fs::write(app_dir.join("version"), "42.1.0\n").unwrap();
+
+    assert_eq!(codex_app_version(&app_dir).as_deref(), Some("42.1.0"));
+}
+
+#[test]
+fn app_paths_prefers_portable_directory_version_over_internal_version_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("versions").join("26.519.2736.0");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    std::fs::write(app_dir.join("Codex.exe"), "").unwrap();
+    std::fs::write(app_dir.join("version"), "42.1.0\n").unwrap();
+
+    assert_eq!(
+        codex_app_version(&app_dir).as_deref(),
+        Some("26.519.2736.0")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn app_paths_resolves_portable_current_link_to_directory_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let versions = temp.path().join("versions");
+    let target = versions.join("26.519.2736.0");
+    let current = versions.join("current");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("Codex.exe"), "").unwrap();
+    std::fs::write(target.join("version"), "42.1.0\n").unwrap();
+    std::os::windows::fs::symlink_dir(&target, &current).unwrap();
+
+    assert_eq!(
+        codex_app_version(&current).as_deref(),
+        Some("26.519.2736.0")
     );
 }
 
@@ -293,6 +342,17 @@ fn app_paths_normalizes_executable_and_package_paths() {
 }
 
 #[test]
+fn app_paths_prefers_chatgpt_entrypoint_when_portable_bundle_contains_codex_shim() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("current");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("Codex.exe"), "").unwrap();
+    std::fs::write(app.join("ChatGPT.exe"), "").unwrap();
+
+    assert_eq!(build_codex_executable(&app), app.join("ChatGPT.exe"));
+}
+
+#[test]
 fn app_paths_normalizes_chatgpt_desktop_executable_and_builds_it() {
     let temp = tempfile::tempdir().unwrap();
     let app = temp
@@ -326,6 +386,70 @@ fn app_paths_saved_path_is_used_when_no_explicit_path_is_provided() {
 }
 
 #[test]
+fn app_paths_rejects_codex_plus_plus_install_dir_as_codex_app() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = temp.path().join("Programs").join("Codex++");
+    std::fs::create_dir_all(&manager).unwrap();
+    std::fs::write(manager.join("Codex++ Manager.exe"), "").unwrap();
+
+    assert_eq!(normalize_codex_app_path(&manager), None);
+    assert_eq!(
+        normalize_codex_app_path(&manager.join("Codex++ Manager.exe")),
+        None
+    );
+
+    let resolved = resolve_codex_app_dir_with_saved(None, Some(&manager.to_string_lossy()));
+    assert_ne!(resolved.as_deref(), Some(manager.as_path()));
+}
+
+#[test]
+fn app_paths_rejects_plain_directory_without_codex_executable() {
+    let temp = tempfile::tempdir().unwrap();
+    let plain = temp.path().join("not-a-codex-app");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("readme.txt"), "nope").unwrap();
+
+    assert_eq!(normalize_codex_app_path(&plain), None);
+    assert_eq!(normalize_codex_app_path(&plain.join("readme.txt")), None);
+}
+
+#[test]
+fn app_paths_empty_saved_path_matches_no_saved_path() {
+    assert_eq!(
+        resolve_codex_app_dir_with_saved(None, Some("")),
+        resolve_codex_app_dir_with_saved(None, None)
+    );
+    assert_eq!(
+        resolve_codex_app_dir_with_saved(None, Some("   ")),
+        resolve_codex_app_dir_with_saved(None, None)
+    );
+}
+
+#[test]
+fn app_paths_invalid_saved_path_falls_back_instead_of_sticking() {
+    let temp = tempfile::tempdir().unwrap();
+    let junk = temp.path().join("Codex++");
+    std::fs::create_dir_all(&junk).unwrap();
+
+    // 合法独立安装：即使 saved 指向 Codex++，规范化失败后应能落到该候选
+    // （通过显式 app_dir 验证回退链之外的合法路径仍可用）
+    let standalone = temp.path().join("OpenAI").join("Codex").join("bin");
+    std::fs::create_dir_all(&standalone).unwrap();
+    std::fs::write(standalone.join("codex.exe"), "").unwrap();
+
+    assert_eq!(normalize_codex_app_path(&junk), None);
+    assert_eq!(
+        normalize_codex_app_path(&standalone).as_deref(),
+        Some(standalone.as_path())
+    );
+    assert_eq!(
+        resolve_codex_app_dir_with_saved(Some(&standalone), Some(&junk.to_string_lossy()))
+            .as_deref(),
+        Some(standalone.as_path())
+    );
+}
+
+#[test]
 fn launcher_builds_debug_arguments_and_commands() {
     let app_dir = PathBuf::from(r"C:\Codex\app");
 
@@ -348,6 +472,15 @@ fn launcher_does_not_override_codex_app_environment() {
     assert!(!source.contains(".envs(codex_process_environment())"));
     assert!(!source.contains("activate_packaged_app_with_environment"));
     assert!(!source.contains("with_temporary_proxy_environment"));
+}
+
+#[test]
+fn launcher_prepares_projectless_main_window_when_enhancements_are_enabled() {
+    let source = include_str!("../src/launcher.rs");
+
+    assert!(source.contains("if settings.enhancements_enabled"));
+    assert!(source.contains("prepare_projectless_main_window_nonfatal"));
+    assert!(source.contains("launcher.prelaunch"));
 }
 
 #[test]
@@ -551,14 +684,13 @@ fn launcher_plugin_marketplace_unlock_repairs_role_specific_plugins() {
 }
 
 #[test]
-fn app_paths_parse_appx_install_location_from_powershell_output() {
-    let output =
-        "\r\nC:\\Program Files\\WindowsApps\\OpenAI.Codex_26.611.7849.0_x64__2p2nqsd0c76g0\r\n";
+fn app_paths_uses_native_windows_package_api_without_powershell() {
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/app_paths.rs")).unwrap();
 
-    assert_eq!(
-        latest_appx_install_location_from_output(output).as_deref(),
-        Some(r"C:\Program Files\WindowsApps\OpenAI.Codex_26.611.7849.0_x64__2p2nqsd0c76g0")
-    );
+    assert!(source.contains("GetPackagesByPackageFamily"));
+    assert!(source.contains("GetPackagePathByFullName"));
+    assert!(!source.contains("Command::new(\"powershell\")"));
 }
 
 #[test]
@@ -1226,6 +1358,10 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
             model_insert_mode: codex_plus_core::settings::RelayModelInsertMode::default(),
             model_list: String::new(),
             model_windows: String::new(),
+            model_vlm: String::new(),
+            vlm_api_key: String::new(),
+            vlm_model: String::new(),
+            vlm_base_url: String::new(),
             user_agent: String::new(),
         }],
         active_relay_id: "relay-chat".to_string(),
@@ -1426,6 +1562,14 @@ async fn default_launch_hooks_provider_sync_enabled_returns_explicit_error() {
             .to_string()
             .contains("provider sync requires launcher hooks")
     );
+}
+
+#[test]
+fn paused_dream_skin_does_not_reapply_the_native_base_theme_on_launch() {
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/launcher.rs")).unwrap();
+
+    assert!(source.contains("!settings.codex_app_dream_skin_paused"));
 }
 
 #[derive(Clone)]
