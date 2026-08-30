@@ -9302,7 +9302,6 @@
       );
     }
     installCodexPlusSidebarNavigation();
-    installSessionShareImportListener();
     localizeCodexMenus();
     scheduleBackendHeartbeat();
     installDeleteButtonEventDelegation();
@@ -10254,7 +10253,6 @@
     archivedPageRows().forEach(attachArchivedPageDeleteButton);
     refreshConversationView();
     installCodexServiceTierBadge();
-    installSessionShareButton();
     scheduleThreadScrollSync();
     refreshCodexModelWhitelistFromScan(window.__codexSessionDeleteLastMutations);
   }

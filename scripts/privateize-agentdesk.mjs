@@ -11,6 +11,15 @@ const dryRun = args.has("--dry-run") || !apply;
 const auditOnly = args.has("--audit");
 const verifyUpstream = args.has("--verify-upstream");
 
+const bundledSkinPackThemePaths = new Set([
+  "assets/inject/upstream/skin-packs/packs/caishen-lite/theme.json",
+  "assets/inject/upstream/skin-packs/packs/caishen-max/theme.json",
+  "assets/inject/upstream/skin-packs/packs/caishen-readable/theme.json",
+  "assets/inject/upstream/skin-packs/packs/export-night/theme.json",
+  "assets/inject/upstream/skin-packs/packs/global-founder-bright/theme.json",
+  "assets/inject/upstream/skin-packs/packs/mythic-guardian-noir/theme.json",
+]);
+
 const trackedFiles = [
   ".github/ISSUE_TEMPLATE/bug_report.yml",
   ".github/ISSUE_TEMPLATE/config.yml",
@@ -31,11 +40,15 @@ const trackedFiles = [
   "services/share-site/index.html",
   "assets/installer/macos/dmg-background.svg",
   "assets/inject/renderer-inject.js",
+  "assets/inject/upstream/cidala-tiger/macos/theme.json",
+  "assets/inject/upstream/dream-skin/macos/theme.json",
+  ...bundledSkinPackThemePaths,
   "assets/inject/stepwise-inject.js",
   "assets/inject/floating-panel/core/appearance-runtime.js",
   "assets/inject/floating-panel/core/views.js",
   "apps/codex-plus-manager/index.html",
   "apps/codex-plus-manager/src/App.tsx",
+  "apps/codex-plus-manager/src/dream-skin.ts",
   "apps/codex-plus-manager/src/dream-skin.test.ts",
   "apps/codex-plus-manager/src/i18n-en.ts",
   "apps/codex-plus-manager/src/presets.ts",
@@ -63,6 +76,7 @@ const trackedFiles = [
   "crates/codex-plus-core/src/paths.rs",
   "crates/codex-plus-core/src/script_market.rs",
   "crates/codex-plus-core/src/session_share.rs",
+  "crates/codex-plus-core/src/settings.rs",
   "crates/codex-plus-core/src/share.rs",
   "crates/codex-plus-core/src/update.rs",
   "crates/codex-plus-core/src/user_scripts.rs",
@@ -70,6 +84,9 @@ const trackedFiles = [
   "crates/codex-plus-core/tests/ads.rs",
   "crates/codex-plus-core/tests/cdp_bridge.rs",
   "crates/codex-plus-core/tests/cli_wrapper.rs",
+  "crates/codex-plus-core/tests/dream_skin.rs",
+  "crates/codex-plus-core/tests/dream_skin_market.rs",
+  "crates/codex-plus-core/tests/upstream_theme_assets.rs",
   "crates/codex-plus-core/tests/installers.rs",
   "crates/codex-plus-core/tests/updater.rs",
   "scripts/installer/macos/package-dmg.sh",
@@ -495,7 +512,35 @@ function patchRendererInject(text) {
     /<br>Telegram: <a href="[^"]+" target="_blank" rel="noreferrer">[^<]+<\/a>/,
     ""
   );
+  if (!config.sessionShare.enabled) {
+    next = next
+      .replace(/\n\s*installSessionShareImportListener\(\);/g, "")
+      .replace(/\n\s*installSessionShareButton\(\);/g, "");
+  }
   return next.replace(/重启 AgentDesk/g, "重启 Codex");
+}
+
+function localOnlyUserScriptsScreen() {
+  return `function UserScriptsScreen({ settings, actions }: { settings: SettingsResult | null; market: ScriptMarketResult | null; actions: Actions }) {
+  const inventory = settings?.user_scripts;
+  const scripts = inventory?.scripts ?? [];
+  return (
+    <Panel>
+      <CardHead title={t("本地脚本")} detail={inventory?.enabled === false ? t("关闭") : t("开启")} />
+      <CardContent>
+        <Toolbar>
+          <Button onClick={() => void actions.refreshCurrent()} variant="secondary">
+            <RefreshCw className="h-4 w-4" />
+            {t("刷新本地")}
+          </Button>
+        </Toolbar>
+        <div className="table">
+          {scripts.length ? scripts.map((script) => <ScriptRow key={script.key} script={script} actions={actions} />) : <div className="empty">{t("未发现用户脚本。")}</div>}
+        </div>
+      </CardContent>
+    </Panel>
+  );
+}`;
 }
 
 function patchManagerApp(text) {
@@ -510,6 +555,16 @@ function patchManagerApp(text) {
       /\s*<Button onClick=\{\(\) => void actions\.openExternalUrl\(SCRIPT_MARKET_REPOSITORY_URL\)\} variant="secondary">[\s\S]*?<\/Button>\s*/g,
       ""
     );
+    next = next
+      .replace(
+        '{ id: "userScripts", label: t("脚本市场"), icon: FileCode2 },',
+        '{ id: "userScripts", label: t("本地脚本"), icon: FileCode2 },'
+      )
+      .replace(/\n\s*await refreshScriptMarket\(true\);/g, "")
+      .replace(
+        /function UserScriptsScreen\([\s\S]*?\n\}\n\n(?=function SessionsScreen)/,
+        `${localOnlyUserScriptsScreen()}\n\n`
+      );
   } else {
     next = next.replace(
       /const SCRIPT_MARKET_REPOSITORY_URL = "[^"]*";/,
@@ -529,10 +584,52 @@ function patchManagerApp(text) {
       /recommendations: t\("[^"]*"\),/,
       'recommendations: t("二狗子中转推荐"),'
     );
+    next = next
+      .replace(
+        /\n\s*const sponsors = items\.filter\(\(ad\) => ad\.type === "sponsor"\);\n\s*const normal = items\.filter\(\(ad\) => ad\.type === "normal"\);/,
+        '\n  const recommendations = items.filter((ad) => ad.type === "sponsor");'
+      )
+      .replace(
+        /\n\s*<Panel>\n\s*<CardHead title=\{t\("赞助商推荐"\)\}[\s\S]*?<\/Panel>\n\s*<Panel>\n\s*<CardHead title=\{t\("普通推荐"\)\}[\s\S]*?<\/Panel>/,
+        `
+      <Panel>
+        <CardHead title={t("推荐内容")} detail={tf("{0} 条", [recommendations.length])} />
+        <CardContent>
+          <AdGrid actions={actions} ads={recommendations} empty={t("尚未加载推荐内容")} />
+        </CardContent>
+      </Panel>`
+      );
+  }
+  if (!config.sessionShare.enabled) {
     next = next.replace(
-      /\n\s*\{normal\.length > 0 \? \([\s\S]*?\) : null\}/,
+      /\n\s*<div className="session-share-import">[\s\S]*?<\/div>/,
       ""
     );
+  }
+  if (!config.dreamSkinSources.enabled) {
+    next = next
+      .replace(
+        'const [themeView, setThemeView] = useState<"market" | "community" | "local">("community");',
+        'const [themeView, setThemeView] = useState<"market" | "community" | "local">("local");'
+      )
+      .replace(/\n\s*await refreshDreamSkinMarket\(true\);/g, "")
+      .replace(/\n\s*await refreshDreamSkinCommunity\(true\);/g, "")
+      .replace(/\n\s*await refreshPendingDreamSkinCommunity\(\);/g, "")
+      .replace(/\n\s*void refreshPendingDreamSkinCommunity\(\);/g, "")
+      .replace(
+        /\n\s*\{pendingDreamSkinCommunity \? \([\s\S]*?\) : null\}/,
+        ""
+      )
+      .replace(
+        /\n\s*<button\n\s*aria-selected=\{themeView === "community"\}[\s\S]*?<\/button>\n\s*<button\n\s*aria-selected=\{themeView === "market"\}[\s\S]*?<\/button>/,
+        ""
+      )
+      .replace(/https:\/\/github\.com\/xxloocee\/AgentDesk-Themes/g, "")
+      .replace(/https:\/\/dreamskin\.cc\/(?:gallery|studio)/g, "")
+      .replace(/https:\/\/dreamskin\.cc\/preview\?themeVersion=/g, "")
+      .replace(/AgentDesk-Themes/g, "未配置的远程主题源")
+      .replace(/api\.dreamskin\.cc/g, "community.agentdesk.invalid")
+      .replace(/DreamSkin\.cc/g, "远程主题服务");
   }
   next = next.replace(
     /<Button onClick=\{\(\) => void actions\.openExternalUrl\("https:\/\/discord\.gg\/y96kX7A76v"\)\} variant="secondary">[\s\S]*?<\/Button>\s*/g,
@@ -728,9 +825,190 @@ function patchWorkflow(text) {
 }
 
 function patchDocsIndex(text) {
+  return text
+    .replace(
+      /content="https:\/\/codexpp\.cc\/images\/codex-plus-plus\.png"/,
+      `content="${config.website.imageUrl}"`
+    )
+    .replace(
+      /<meta property="og:url" content="https:\/\/codexpp\.cc\/?">/,
+      `<meta property="og:url" content="${config.website.baseUrl}/">`
+    )
+    .replace(
+      /\s*<a href="https:\/\/t\.me\/[^"]+" target="_blank" rel="noreferrer">Telegram<\/a>/,
+      ""
+    );
+}
+
+function patchDocsChangelog(text) {
   return text.replace(
-    /\s*<a href="https:\/\/t\.me\/[^"]+" target="_blank" rel="noreferrer">Telegram<\/a>/,
+    /<meta property="og:url" content="https:\/\/codexpp\.cc\/changelog\.html">/,
+    `<meta property="og:url" content="${config.website.baseUrl}/changelog.html">`
+  );
+}
+
+function patchShareSiteReadme(text) {
+  let next = text
+    .replace(/- Pages project: `codexpp-share`/, `- Pages project: \`${config.sessionShare.pagesProject}\``)
+    .replace(/- Custom domain: `share\.codexpp\.cc`/, "- Custom domain: not configured")
+    .replace(
+      "Cloudflare Pages + Workers KV deployment for encrypted session sharing.",
+      "Cloudflare Pages + Workers KV reference deployment for encrypted session sharing. AgentDesk does not publish this service by default."
+    )
+    .replace(
+      "The API also allows cross-origin requests from the Codex desktop renderer so\nthe injected session-share button can create links without sending plaintext.",
+      "When explicitly enabled, the API allows cross-origin requests from the Codex desktop\nrenderer so clients can create links without sending plaintext."
+    );
+  const disabledNotice = "The AgentDesk session-share entry remains disabled until a self-owned deployment is configured.";
+  if (!next.includes(disabledNotice)) {
+    next = next.replace(
+      "AgentDesk does not publish this service by default.",
+      `AgentDesk does not publish this service by default.\n\n${disabledNotice}`
+    );
+  }
+  return next;
+}
+
+function patchShareSiteIndex(text) {
+  return text.replace('<span class="brand-mark">C++</span>', '<span class="brand-mark">AD</span>');
+}
+
+function patchDreamSkinTs(text) {
+  return text.replace(
+    /\n\s*promoTitle: "感谢 Passion8 赞助",\n\s*promoSub: "passion8\.cc",\n\s*promoUrl: "https:\/\/passion8\.cc\/register\?aff=TuPe",/,
     ""
+  );
+}
+
+function patchSettingsRs(text) {
+  let next = text;
+  for (const key of ["promoTitle", "promoSub", "promoUrl"]) {
+    next = next.replace(
+      new RegExp(`\\n\\s*extra_fields\\.insert\\(\\n\\s*"${key}"\\.to_string\\(\\),[\\s\\S]*?\\n\\s*\\);`),
+      ""
+    );
+  }
+  return next;
+}
+
+function patchDreamSkinMarketRs(text) {
+  return text
+    .replace(
+      /pub const DEFAULT_MARKET_INDEX_URL: &str =\n\s*"[^"]*";/,
+      `pub const DEFAULT_MARKET_INDEX_URL: &str =\n    "${config.dreamSkinSources.marketIndexUrl}";`
+    )
+    .replace(
+      /pub const DEFAULT_MARKET_RAW_BASE_URL: &str =\n\s*"[^"]*";/,
+      `pub const DEFAULT_MARKET_RAW_BASE_URL: &str =\n    "${config.dreamSkinSources.marketRawBaseUrl}";`
+    )
+    .replace(
+      /pub const DEFAULT_MARKET_REPOSITORY_URL: &str =\n\s*"[^"]*";/,
+      `pub const DEFAULT_MARKET_REPOSITORY_URL: &str =\n    "${config.dreamSkinSources.marketRepositoryUrl}";`
+    )
+    .replace(/"AgentDesk-Themes\/\{\}"/, '"AgentDeskThemeMarket/{}"');
+}
+
+function patchDreamSkinCommunityRs(text) {
+  return text
+    .replace(
+      /pub const COMMUNITY_API_ORIGIN: &str = "[^"]*";/,
+      `pub const COMMUNITY_API_ORIGIN: &str = "${config.dreamSkinSources.communityApiOrigin}";`
+    )
+    .replace(
+      /pub const COMMUNITY_GALLERY_URL: &str = "[^"]*";/,
+      `pub const COMMUNITY_GALLERY_URL: &str = "${config.dreamSkinSources.communityGalleryUrl}";`
+    )
+    .replace(
+      /pub const COMMUNITY_STUDIO_URL: &str = "[^"]*";/,
+      `pub const COMMUNITY_STUDIO_URL: &str = "${config.dreamSkinSources.communityStudioUrl}";`
+    )
+    .replace(/https:\/\/api\.dreamskin\.cc/g, config.dreamSkinSources.communityApiOrigin);
+}
+
+function patchDreamSkinMarketTestRs(text) {
+  return text
+    .replace('author: "Codex++".to_string(),', 'author: "Theme Author".to_string(),')
+    .replace(
+      'source_url: "https://github.com/BigPizzaV3/CodexPlusPlus-Themes".to_string(),',
+      'source_url: "https://github.com/example/agentdesk-theme".to_string(),'
+    )
+    .replace(
+      '#[ignore = "requires the public CodexPlusPlus-Themes repository"]',
+      '#[ignore = "requires a configured public theme repository"]'
+    );
+}
+
+function patchBundledDreamSkinTheme(text) {
+  const payload = JSON.parse(text);
+  delete payload.promoTitle;
+  delete payload.promoSub;
+  delete payload.promoUrl;
+  return `${JSON.stringify(payload, null, 2)}\n`;
+}
+
+function patchDreamSkinTestTs(text) {
+  let next = text;
+  if (!next.includes("assert.equal(theme.promoTitle, undefined);")) {
+    next = next.replace(
+      '    assert.equal(theme.colors!.accent, "#E25563");',
+      '    assert.equal(theme.colors!.accent, "#E25563");\n    assert.equal(theme.promoTitle, undefined);\n    assert.equal(theme.promoSub, undefined);\n    assert.equal(theme.promoUrl, undefined);'
+    );
+  }
+  return next.replace(
+    /  it\("(?:separates the remote marketplace from local theme editing|keeps privateized remote asset sources dormant)"[\s\S]*?\n  \}\);/,
+    String.raw`  it("keeps privateized remote asset sources dormant", async () => {
+    const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+
+    assert.match(app, /useState<"market" \| "community" \| "local">\("local"\)/);
+    assert.doesNotMatch(app, /\n\s*await refreshDreamSkinMarket\(true\);/);
+    assert.doesNotMatch(app, /\n\s*await refreshDreamSkinCommunity\(true\);/);
+    assert.doesNotMatch(app, /\n\s*await refreshScriptMarket\(true\);/);
+    assert.doesNotMatch(app, /aria-selected=\{themeView === "community"\}/);
+    assert.doesNotMatch(app, /pendingDreamSkinCommunity \? \(/);
+    assert.doesNotMatch(app, /Codex(?:Plus){2}ScriptMarket|AgentDesk-?Themes|dreamskin[.]cc/i);
+  });`
+  );
+}
+
+function patchDreamSkinTestRs(text) {
+  return text.replace(
+    '        assert_eq!(theme.extra_fields["promoSub"], "passion8.cc");',
+    '        assert!(!theme.extra_fields.contains_key("promoTitle"));\n        assert!(!theme.extra_fields.contains_key("promoSub"));\n        assert!(!theme.extra_fields.contains_key("promoUrl"));'
+  );
+}
+
+function patchUpstreamThemeAssetsTestRs(text) {
+  return text.replace(
+    /#\[test\]\r?\nfn bundled_skin_pack_(?:theme_files_remain_byte_exact|themes_do_not_include_promotional_metadata)\(\) \{[\s\S]*?\r?\n\}\s*$/,
+    `#[test]
+fn bundled_skin_pack_themes_do_not_include_promotional_metadata() {
+    for theme_id in [
+        "caishen-lite",
+        "caishen-max",
+        "caishen-readable",
+        "export-night",
+        "global-founder-bright",
+        "mythic-guardian-noir",
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(format!(
+                "assets/inject/upstream/skin-packs/packs/{theme_id}/theme.json"
+            ));
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let theme: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+        for key in ["promoTitle", "promoSub", "promoUrl"] {
+            assert!(
+                theme.get(key).is_none(),
+                "bundled theme still contains {key}: {}",
+                path.display()
+            );
+        }
+    }
+}
+`
   );
 }
 
@@ -752,6 +1030,12 @@ function patchI18nEn(text) {
     )
     .replace(/"打开 JOJO Code":\s*"Open JOJO Code",/, '"打开二狗子": "Open Ergouzi",')
     .replace(/^\s*"与 Codex 内插件菜单使用同一个远端广告源":\s*"[^"]*",\r?\n/m, "")
+    .replace(/^\s*"内容来自[^"]*赞助商推荐和普通推荐。":\s*\r?\n\s*"[^"]*",\r?\n/m, "")
+    .replace(/^\s*"暂无赞助商推荐。":\s*"[^"]*",\r?\n/m, "")
+    .replace(/^\s*"暂无普通推荐。":\s*"[^"]*",\r?\n/m, "")
+    .replace(/^\s*"赞助商推荐":\s*"[^"]*",\r?\n/m, "")
+    .replace(/^\s*"赞助商推荐与普通推荐":\s*"[^"]*",\r?\n/m, "")
+    .replace(/^\s*"从 AgentDesk-Themes 仓库加载可安装主题。":\s*"[^"]*",\r?\n/m, "")
     .replace(/^\s*"普通推荐":\s*"[^"]*",\r?\n/m, "")
     .replace(/^\s*"其他推荐":\s*"[^"]*",\r?\n/m, "")
     .replace(/^\s*"暂无其他推荐。":\s*"[^"]*",\r?\n/m, "")
@@ -764,7 +1048,23 @@ function patchManagerCommands(text) {
 }
 
 function patchRendererInjectTest(text) {
-  return text.split(String.raw`Codex\+\+`).join("AgentDesk");
+  let next = text.split(String.raw`Codex\+\+`).join("AgentDesk");
+  if (!config.sessionShare.enabled) {
+    next = next.replace(
+      'it("adds an encrypted session sharing button to the active Codex conversation", async () => {',
+      'it("keeps encrypted session sharing implemented but unreachable from the UI", async () => {'
+    );
+    const disabledShareAssertion = '    assert.doesNotMatch(renderer, /\\n\\s*installSessionShareButton\\(\\);/);';
+    if (!next.includes(disabledShareAssertion)) {
+      next = next.replace(
+        '    assert.doesNotMatch(renderer, /window\\.location\\.(?:href|assign)\\s*=\\s*[^;]*markdown/);',
+        `    assert.doesNotMatch(renderer, /window\\.location\\.(?:href|assign)\\s*=\\s*[^;]*markdown/);
+${disabledShareAssertion}
+    assert.doesNotMatch(renderer, /\\n\\s*installSessionShareImportListener\\(\\);/);`
+      );
+    }
+  }
+  return next;
 }
 
 function patchI18nKeys(text) {
@@ -782,6 +1082,10 @@ function patchI18nKeys(text) {
     "Telegram",
     "交流群",
     "赞赏",
+    "AgentDesk-Themes",
+    "CodexPlusPlus-Themes",
+    "CodexPlusPlusScriptMarket",
+    "DreamSkin.cc",
   ];
   for (const key of ["plain", "template"]) {
     if (!Array.isArray(payload[key])) continue;
@@ -835,6 +1139,9 @@ function patchAdsTest(text) {
 
 function transform(relativePath, text) {
   let next = brandReplaceFiles.has(relativePath) ? brandReplace(text) : text;
+  if (bundledSkinPackThemePaths.has(relativePath)) {
+    next = patchBundledDreamSkinTheme(next);
+  }
   switch (relativePath) {
     case ".github/ISSUE_TEMPLATE/bug_report.yml":
       next = patchBugReport(next);
@@ -852,6 +1159,15 @@ function transform(relativePath, text) {
     case "docs/index.html":
       next = patchDocsIndex(next);
       break;
+    case "docs/changelog.html":
+      next = patchDocsChangelog(next);
+      break;
+    case "services/share-site/README.md":
+      next = patchShareSiteReadme(next);
+      break;
+    case "services/share-site/index.html":
+      next = patchShareSiteIndex(next);
+      break;
     case "CONTRIBUTING.md":
     case "AGENTS.md":
     case "HANDOVER.md":
@@ -860,9 +1176,19 @@ function transform(relativePath, text) {
     case "assets/inject/renderer-inject.js":
       next = patchRendererInject(next);
       break;
+    case "assets/inject/upstream/cidala-tiger/macos/theme.json":
+    case "assets/inject/upstream/dream-skin/macos/theme.json":
+      next = patchBundledDreamSkinTheme(next);
+      break;
     case "apps/codex-plus-manager/src/App.tsx":
       next = patchManagerApp(next);
       next = next.replace('<div className="brand-mark">C++</div>', '<div className="brand-mark">AD</div>');
+      break;
+    case "apps/codex-plus-manager/src/dream-skin.ts":
+      next = patchDreamSkinTs(next);
+      break;
+    case "apps/codex-plus-manager/src/dream-skin.test.ts":
+      next = patchDreamSkinTestTs(next);
       break;
     case "apps/codex-plus-manager/src-tauri/src/commands.rs":
       next = patchManagerCommands(next);
@@ -891,6 +1217,15 @@ function transform(relativePath, text) {
     case "crates/codex-plus-core/src/script_market.rs":
       next = patchScriptMarketRs(next);
       break;
+    case "crates/codex-plus-core/src/dream_skin_community.rs":
+      next = patchDreamSkinCommunityRs(next);
+      break;
+    case "crates/codex-plus-core/src/dream_skin_market.rs":
+      next = patchDreamSkinMarketRs(next);
+      break;
+    case "crates/codex-plus-core/src/settings.rs":
+      next = patchSettingsRs(next);
+      break;
     case "crates/codex-plus-core/src/paths.rs":
       next = patchPathsRs(next);
       break;
@@ -906,6 +1241,15 @@ function transform(relativePath, text) {
         '    assert!(script.contains("xxloocee/AgentDesk"));\n',
         '    assert!(script.contains("return { version: 1, ads: [] };"));\n'
       );
+      break;
+    case "crates/codex-plus-core/tests/dream_skin.rs":
+      next = patchDreamSkinTestRs(next);
+      break;
+    case "crates/codex-plus-core/tests/dream_skin_market.rs":
+      next = patchDreamSkinMarketTestRs(next);
+      break;
+    case "crates/codex-plus-core/tests/upstream_theme_assets.rs":
+      next = patchUpstreamThemeAssetsTestRs(next);
       break;
     case "crates/codex-plus-core/tests/installers.rs":
       next = patchInstallersTest(next);
@@ -939,6 +1283,17 @@ function auditEntries(entries) {
     "jojocode-max",
     "drGuwc9k",
     "cloud.siliconflow.cn/i/",
+    "Passion8",
+    "passion8.cc",
+    "https://codexpp.cc",
+    "share.codexpp.cc",
+    "codexpp-share.pages.dev",
+    "docs.qq.com/doc/DQ2VOanZTTFZJcUpZ",
+    "CodexPlusPlusScriptMarket",
+    "AgentDesk-Themes",
+    "DreamSkin.cc",
+    "dreamskin.cc",
+    "codex-theme-gallery.howardhua.chatgpt.site",
     "重启 AgentDesk",
     "restarting AgentDesk",
   ];
@@ -970,14 +1325,50 @@ function auditEntries(entries) {
   const allowedFragmentsByFile = {
     "README.md": ["[BigPizzaV3/CodexPlusPlus](https://github.com/BigPizzaV3/CodexPlusPlus)"],
     "README_EN.md": ["[BigPizzaV3/CodexPlusPlus](https://github.com/BigPizzaV3/CodexPlusPlus)"],
-    "apps/codex-plus-manager/src/App.tsx": ["BigPizzaV3/CodexPlusPlusScriptMarket"],
-    "crates/codex-plus-core/src/script_market.rs": ["BigPizzaV3/CodexPlusPlusScriptMarket"],
     // User-Agent 属于运行时协议标识，不要求随产品品牌改名。
     "crates/codex-plus-core/src/ads.rs": ['proxied_client("CodexPlusPlus")'],
     "crates/codex-plus-core/src/update.rs": [
       'format!("Codex++/{}", crate::version::VERSION)',
       "`CodexPlusPlus_1.0.9_x64.dmg`",
     ],
+    // 分享实现暂时保留，只移除用户可达入口；未来接入自有服务后再替换这些兼容端点。
+    "assets/inject/renderer-inject.js": [
+      'const codexPlusShareBaseUrl = "https://share.codexpp.cc";',
+      'const codexPlusShareFallbackBaseUrl = "https://codexpp-share.pages.dev";',
+    ],
+    "crates/codex-plus-core/src/session_share.rs": [
+      'const SHARE_HOSTS: &[&str] = &["share.codexpp.cc", "codexpp-share.pages.dev"];',
+    ],
+    "crates/codex-plus-core/src/share.rs": [
+      '    "https://share.codexpp.cc/api/shares",',
+      '    "https://codexpp-share.pages.dev/api/shares",',
+    ],
+  };
+  const forbiddenFragmentsByFile = {
+    "apps/codex-plus-manager/src/App.tsx": [
+      'className="session-share-import"',
+      "await refreshScriptMarket(true);",
+      "await refreshDreamSkinMarket(true);",
+      "await refreshDreamSkinCommunity(true);",
+      'aria-selected={themeView === "community"}',
+      "pendingDreamSkinCommunity ? (",
+      "赞助商推荐",
+      "普通推荐",
+      "暂无赞助商推荐",
+      "暂无普通推荐",
+    ],
+    "apps/codex-plus-manager/src/i18n-en.ts": [
+      "赞助商推荐",
+      "普通推荐",
+      "暂无赞助商推荐",
+      "暂无普通推荐",
+    ],
+    "assets/inject/renderer-inject.js": [
+      "installSessionShareButton();",
+      "installSessionShareImportListener();",
+    ],
+    "services/share-site/README.md": ["Pages project: `codexpp-share`"],
+    "services/share-site/index.html": ['<span class="brand-mark">C++</span>'],
   };
   for (const { actualPath, contents } of entries) {
     let auditableContents = contents;
@@ -986,6 +1377,9 @@ function auditEntries(entries) {
     }
     for (const needle of needles) {
       if (auditableContents.includes(needle)) hits.push({ file: actualPath, needle });
+    }
+    for (const needle of forbiddenFragmentsByFile[actualPath] ?? []) {
+      if (contents.includes(needle)) hits.push({ file: actualPath, needle });
     }
     if (publicDocumentPaths.has(actualPath)) {
       for (const needle of publicDocumentNeedles) {

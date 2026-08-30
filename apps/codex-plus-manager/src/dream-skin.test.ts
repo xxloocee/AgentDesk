@@ -18,6 +18,9 @@ describe("dream skin theme helpers", () => {
     assert.equal(theme.stylePreset, undefined);
     assert.equal(theme.brandSubtitle, "CODEX DREAM SKIN");
     assert.equal(theme.colors!.accent, "#E25563");
+    assert.equal(theme.promoTitle, undefined);
+    assert.equal(theme.promoSub, undefined);
+    assert.equal(theme.promoUrl, undefined);
   });
 
   it("restores an invalid color without dropping valid text", () => {
@@ -331,17 +334,16 @@ describe("dream skin theme helpers", () => {
     assert.match(app, /if \(isWindowsPlatform\) \{[\s\S]*delete config\.colors;[\s\S]*delete config\.palette;/);
   });
 
-  it("separates the remote marketplace from local theme editing", async () => {
+  it("keeps privateized remote asset sources dormant", async () => {
     const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
-    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
-    assert.match(app, /refresh_dream_skin_market/);
-    assert.match(app, /install_dream_skin_market_theme/);
-    assert.match(app, /主题市场/);
-    assert.match(app, /投稿主题/);
-    assert.match(app, /onInstalled=\{\(\) => setThemeView\("local"\)\}/);
-    assert.match(css, /\.dream-skin-market-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,/s);
-    assert.match(css, /\.dream-skin-market-preview\s*\{[^}]*aspect-ratio:\s*16 \/ 9/s);
+    assert.match(app, /useState<"market" \| "community" \| "local">\("local"\)/);
+    assert.doesNotMatch(app, /\n\s*await refreshDreamSkinMarket\(true\);/);
+    assert.doesNotMatch(app, /\n\s*await refreshDreamSkinCommunity\(true\);/);
+    assert.doesNotMatch(app, /\n\s*await refreshScriptMarket\(true\);/);
+    assert.doesNotMatch(app, /aria-selected=\{themeView === "community"\}/);
+    assert.doesNotMatch(app, /pendingDreamSkinCommunity \? \(/);
+    assert.doesNotMatch(app, /Codex(?:Plus){2}ScriptMarket|AgentDesk-?Themes|dreamskin[.]cc/i);
   });
 
   it("allows the webview to load managed theme images only", async () => {
