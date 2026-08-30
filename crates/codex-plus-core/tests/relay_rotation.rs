@@ -4,7 +4,7 @@ use codex_plus_core::relay_rotation::{
 };
 use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
-    RelayMode, RelayProfile,
+    RelayMode, RelayProfile, RelaySessionProvider,
 };
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -29,6 +29,7 @@ fn aggregate(strategy: AggregateRelayStrategy) -> AggregateRelayProfile {
     AggregateRelayProfile {
         id: "agg".to_string(),
         name: "聚合".to_string(),
+        session_provider: RelaySessionProvider::Custom,
         strategy,
         members: vec![
             AggregateRelayMember {
@@ -51,6 +52,7 @@ fn aggregate_with_id(id: &str, strategy: AggregateRelayStrategy) -> AggregateRel
     AggregateRelayProfile {
         id: id.to_string(),
         name: "聚合".to_string(),
+        session_provider: RelaySessionProvider::Custom,
         strategy,
         members: vec![
             AggregateRelayMember {
@@ -233,6 +235,28 @@ fn aggregate_members_must_be_api_capable_relay_profiles() {
             relay_id: "official-login".to_string()
         }
     );
+}
+
+#[test]
+fn aggregate_members_accept_no_auth_pure_api_profiles() {
+    let mut settings = settings(AggregateRelayStrategy::RequestRoundRobin);
+    settings.relay_profiles[0] = RelayProfile {
+        id: "relay-a".to_string(),
+        name: "relay-a".to_string(),
+        base_url: "https://relay-a.example/v1".to_string(),
+        relay_mode: RelayMode::PureApi,
+        no_auth: true,
+        api_key: String::new(),
+        ..RelayProfile::default()
+    };
+
+    let mut selector = RelayRotationSelector::from_settings(&settings).unwrap();
+    let selected = selector
+        .select(&settings, RotationContext::default())
+        .unwrap();
+
+    assert_eq!(selected.id, "relay-a");
+    assert!(selected.uses_no_auth());
 }
 
 #[test]

@@ -16,9 +16,7 @@
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
 </p>
 
-AgentDesk is an external launcher and manager for the OpenAI Codex / ChatGPT desktop app.
-
-AgentDesk uses the Chromium DevTools Protocol and a local helper for provider switching, protocol conversion, session management, and UI enhancements without modifying the official app's `app.asar` or installation files.
+AgentDesk is an external launcher and manager for the OpenAI Codex / ChatGPT desktop app. It uses the Chromium DevTools Protocol and a local helper for provider switching, protocol conversion, session management, and UI enhancements without modifying the official app's `app.asar` or installation files.
 
 ## Quick Start
 
@@ -102,7 +100,7 @@ Run the model test or Provider Doctor from the provider detail page. Verify that
 
 ### macOS says the app cannot be opened or is damaged
 
-Unsigned and unnotarized builds may be blocked by Gatekeeper. Allow the app in System Settings -> Privacy & Security, or clear quarantine attributes if needed. For formal distribution, configure Apple Developer ID signing and notarization.
+Unsigned and unnotarized builds may be blocked by Gatekeeper. Allow the app in System Settings -> Privacy & Security. For formal distribution, configure Apple Developer ID signing and notarization.
 
 ### Does it support Intel Macs?
 
@@ -134,8 +132,8 @@ crates/
   codex-plus-core/              Launch, injection, config, update, install, bridge
   codex-plus-data/              Session data, export, Provider Sync
 scripts/installer/
-    windows/AgentDesk.nsi       Windows NSIS installer
-    macos/package-dmg.sh        macOS DMG packager
+  windows/AgentDesk.nsi     Windows NSIS installer
+  macos/package-dmg.sh          macOS DMG packager
 ```
 
 ## License

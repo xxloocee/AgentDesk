@@ -11,11 +11,11 @@ use crate::dream_skin_library::{DreamSkinThemeDraft, DreamSkinThemeSummary};
 use crate::settings::DreamSkinThemeConfig;
 
 pub const DEFAULT_MARKET_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlus-Themes/main/index.json";
+    "https://raw.githubusercontent.com/xxloocee/AgentDesk-Themes/main/index.json";
 pub const DEFAULT_MARKET_RAW_BASE_URL: &str =
-    "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlus-Themes/main/";
+    "https://raw.githubusercontent.com/xxloocee/AgentDesk-Themes/main/";
 pub const DEFAULT_MARKET_REPOSITORY_URL: &str =
-    "https://github.com/BigPizzaV3/CodexPlusPlus-Themes";
+    "https://github.com/xxloocee/AgentDesk-Themes";
 
 const MARKET_CACHE_FILE: &str = "dream-skin/market/index.json";
 const MARKET_INSTALLS_FILE: &str = "dream-skin/market/installed.json";
@@ -240,7 +240,7 @@ fn validate_market_theme(theme: &DreamSkinMarketTheme) -> anyhow::Result<()> {
 fn market_http_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(format!(
-            "CodexPlusPlus-Themes/{}",
+            "AgentDesk-Themes/{}",
             env!("CARGO_PKG_VERSION")
         ))
         .connect_timeout(Duration::from_secs(8))

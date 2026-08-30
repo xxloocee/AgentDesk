@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -12,7 +12,6 @@ pub const WATCHER_INTERVAL_SECONDS: f64 = 3.0;
 pub const CDP_PROBE_TIMEOUT_SECONDS: f64 = 0.5;
 pub const TAKEOVER_FAILURE_BACKOFF_SECONDS: f64 = 30.0;
 pub const RESTART_STOP_WAIT_TIMEOUT_MS: u64 = 5_000;
-pub const RESTART_START_WAIT_TIMEOUT_MS: u64 = 20_000;
 const RESTART_STOP_WAIT_INTERVAL_MS: u64 = 100;
 pub const WATCHER_RUN_NAME: &str = "CodexPlusPlusWatcher";
 pub const WATCHER_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -152,6 +151,64 @@ pub fn process_ids_still_running(
         .into_iter()
         .filter(|process_id| expected.contains(process_id))
         .collect()
+}
+
+#[cfg(windows)]
+pub fn process_id_is_running(process_id: u32) -> Option<bool> {
+    if process_id == 0 {
+        return Some(false);
+    }
+    let processes = crate::windows_integration::enumerate_processes();
+    if processes.is_empty() {
+        return None;
+    }
+    Some(
+        processes
+            .iter()
+            .any(|process| process.process_id == process_id),
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn process_id_is_running(process_id: u32) -> Option<bool> {
+    if process_id == 0 {
+        return Some(false);
+    }
+    match std::fs::metadata(Path::new("/proc").join(process_id.to_string())) {
+        Ok(_) => Some(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_id_is_running(process_id: u32) -> Option<bool> {
+    if process_id == 0 {
+        return Some(false);
+    }
+    let process_id_arg = process_id.to_string();
+    let output = Command::new("ps")
+        .args(["-p", process_id_arg.as_str(), "-o", "pid="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return match output.status.code() {
+            Some(1) => Some(false),
+            _ => None,
+        };
+    }
+    let process_ids = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().parse::<u32>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    Some(process_ids.contains(&process_id))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub fn process_id_is_running(_process_id: u32) -> Option<bool> {
+    None
 }
 
 #[cfg(windows)]
@@ -314,11 +371,18 @@ pub fn stop_launcher_processes() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn stop_launcher_processes() {
+    for process_id in find_launcher_processes() {
+        let _ = terminate_macos_process(process_id);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn stop_launcher_processes() {}
 
 #[cfg(windows)]
-pub fn stop_launcher_processes_and_wait() -> anyhow::Result<()> {
+pub fn stop_launcher_processes_and_wait() {
     let processes = crate::windows_integration::enumerate_processes();
     let killable = filter_killable_launcher_processes(
         processes.iter().map(|process| {
@@ -334,13 +398,21 @@ pub fn stop_launcher_processes_and_wait() -> anyhow::Result<()> {
         killable,
         RESTART_STOP_WAIT_TIMEOUT_MS,
         RESTART_STOP_WAIT_INTERVAL_MS,
-    )
+    );
 }
 
-#[cfg(not(windows))]
-pub fn stop_launcher_processes_and_wait() -> anyhow::Result<()> {
-    anyhow::bail!("当前平台暂不支持重启 Codex")
+#[cfg(target_os = "macos")]
+pub fn stop_launcher_processes_and_wait() {
+    terminate_macos_processes_and_wait(
+        find_launcher_processes(),
+        || find_launcher_processes(),
+        RESTART_STOP_WAIT_TIMEOUT_MS,
+        RESTART_STOP_WAIT_INTERVAL_MS,
+    );
 }
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn stop_launcher_processes_and_wait() {}
 
 #[cfg(windows)]
 pub fn stop_codex_processes() {
@@ -349,92 +421,176 @@ pub fn stop_codex_processes() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn stop_codex_processes() {}
 
+#[cfg(target_os = "macos")]
+pub fn stop_codex_processes() {
+    for process_id in find_codex_processes() {
+        let _ = terminate_macos_process(process_id);
+    }
+}
+
 #[cfg(windows)]
-pub fn stop_codex_processes_and_wait() -> anyhow::Result<()> {
+pub fn stop_codex_processes_and_wait() {
     terminate_and_wait_for_exit(
         find_codex_processes(),
         RESTART_STOP_WAIT_TIMEOUT_MS,
         RESTART_STOP_WAIT_INTERVAL_MS,
-    )
+    );
 }
 
-#[cfg(not(windows))]
-pub fn stop_codex_processes_and_wait() -> anyhow::Result<()> {
-    anyhow::bail!("当前平台暂不支持重启 Codex")
+#[cfg(target_os = "macos")]
+pub fn stop_codex_processes_and_wait() {
+    terminate_macos_processes_and_wait(
+        find_codex_processes(),
+        || find_codex_processes(),
+        RESTART_STOP_WAIT_TIMEOUT_MS,
+        RESTART_STOP_WAIT_INTERVAL_MS,
+    );
 }
 
-#[cfg(windows)]
-fn terminate_and_wait_for_exit(
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn stop_codex_processes_and_wait() {}
+
+#[cfg(target_os = "macos")]
+pub fn stop_codex_processes_for_debug_port_and_wait(debug_port: u16) {
+    terminate_macos_processes_and_wait(
+        find_macos_codex_processes_for_debug_port(debug_port),
+        || find_macos_codex_processes_for_debug_port(debug_port),
+        RESTART_STOP_WAIT_TIMEOUT_MS,
+        RESTART_STOP_WAIT_INTERVAL_MS,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn stop_codex_processes_for_debug_port_and_wait(_debug_port: u16) {
+    stop_codex_processes_and_wait();
+}
+
+#[cfg(target_os = "macos")]
+fn terminate_macos_processes_and_wait<F>(
     process_ids: Vec<u32>,
+    mut find_processes: F,
     timeout_ms: u64,
     interval_ms: u64,
-) -> anyhow::Result<()> {
+) where
+    F: FnMut() -> Vec<u32>,
+{
     if process_ids.is_empty() {
-        return Ok(());
+        return;
     }
     for process_id in &process_ids {
-        let _ = crate::windows_integration::terminate_process(*process_id);
+        let _ = terminate_macos_process(*process_id);
     }
-    let remaining = wait_for_process_exit(
-        &process_ids,
-        || {
-            crate::windows_integration::enumerate_processes()
-                .into_iter()
-                .map(|process| process.process_id)
-                .collect()
-        },
-        timeout_ms,
-        interval_ms,
-    );
-    if remaining.is_empty() {
-        return Ok(());
-    }
-    let _ = crate::diagnostic_log::append_diagnostic_log(
-        "watcher.stop_wait_timeout",
-        serde_json::json!({
-            "remaining_process_ids": remaining,
-            "timeout_ms": timeout_ms
-        }),
-    );
-    anyhow::bail!("进程未在 {} 毫秒内退出：{:?}", timeout_ms, remaining);
-}
-
-fn wait_for_process_exit(
-    expected: &[u32],
-    mut scan: impl FnMut() -> Vec<u32>,
-    timeout_ms: u64,
-    interval_ms: u64,
-) -> Vec<u32> {
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        let remaining = process_ids_still_running(expected, scan());
+        let remaining = process_ids_still_running(&process_ids, find_processes());
         if remaining.is_empty() || std::time::Instant::now() >= deadline {
-            return remaining;
+            if !remaining.is_empty() {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "watcher.stop_wait_timeout",
+                    serde_json::json!({
+                        "remaining_process_ids": remaining,
+                        "timeout_ms": timeout_ms,
+                        "platform": "macos"
+                    }),
+                );
+            }
+            break;
         }
         std::thread::sleep(Duration::from_millis(interval_ms));
     }
 }
 
-pub fn wait_for_codex_process_start(timeout_ms: u64, interval_ms: u64) -> Vec<u32> {
-    wait_for_process_start(find_codex_processes, timeout_ms, interval_ms)
+#[cfg(target_os = "macos")]
+fn terminate_macos_process(process_id: u32) -> std::io::Result<()> {
+    Command::new("kill")
+        .arg(process_id.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
 }
 
-fn wait_for_process_start(
-    mut scan: impl FnMut() -> Vec<u32>,
-    timeout_ms: u64,
-    interval_ms: u64,
+#[cfg(target_os = "macos")]
+fn find_launcher_processes() -> Vec<u32> {
+    std::process::Command::new("pgrep")
+        .args(["-x", crate::install::SILENT_BINARY])
+        .output()
+        .ok()
+        .into_iter()
+        .flat_map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|value| value.trim().parse::<u32>().ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn find_macos_codex_processes_for_debug_port(debug_port: u16) -> Vec<u32> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,args="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    macos_codex_process_ids_for_debug_port(
+        String::from_utf8_lossy(&output.stdout).lines(),
+        debug_port,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_codex_process_ids_for_debug_port<'a>(
+    process_lines: impl IntoIterator<Item = &'a str>,
+    debug_port: u16,
 ) -> Vec<u32> {
+    let debug_flag = format!("remote-debugging-port={debug_port}");
+    let mut ids = process_lines
+        .into_iter()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let (pid, args) = trimmed.split_once(char::is_whitespace)?;
+            let process_id = pid.parse::<u32>().ok()?;
+            let is_desktop_main = (args.contains(".app/Contents/MacOS/ChatGPT")
+                || args.contains(".app/Contents/MacOS/Codex"))
+                && !args.contains("/Helpers/");
+            (is_desktop_main && args.contains(&debug_flag)).then_some(process_id)
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+#[cfg(windows)]
+fn terminate_and_wait_for_exit(process_ids: Vec<u32>, timeout_ms: u64, interval_ms: u64) {
+    if process_ids.is_empty() {
+        return;
+    }
+    for process_id in &process_ids {
+        let _ = crate::windows_integration::terminate_process(*process_id);
+    }
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        let process_ids = scan();
-        if !process_ids.is_empty() {
-            return process_ids;
-        }
-        if std::time::Instant::now() >= deadline {
-            return Vec::new();
+        let running_process_ids = crate::windows_integration::enumerate_processes()
+            .into_iter()
+            .map(|process| process.process_id);
+        let remaining = process_ids_still_running(&process_ids, running_process_ids);
+        if remaining.is_empty() || std::time::Instant::now() >= deadline {
+            if !remaining.is_empty() {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "watcher.stop_wait_timeout",
+                    serde_json::json!({
+                        "remaining_process_ids": remaining,
+                        "timeout_ms": timeout_ms
+                    }),
+                );
+            }
+            break;
         }
         std::thread::sleep(Duration::from_millis(interval_ms));
     }
@@ -483,55 +639,4 @@ fn startup_shortcut_path() -> Option<PathBuf> {
             .join("Startup")
             .join(WATCHER_STARTUP_SHORTCUT_NAME)
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{wait_for_process_exit, wait_for_process_start};
-
-    #[test]
-    fn wait_for_process_exit_returns_empty_after_processes_stop() {
-        let mut scans = 0;
-        let remaining = wait_for_process_exit(
-            &[10, 20],
-            || {
-                scans += 1;
-                if scans == 1 { vec![10, 20] } else { Vec::new() }
-            },
-            100,
-            0,
-        );
-
-        assert!(remaining.is_empty());
-        assert_eq!(scans, 2);
-    }
-
-    #[test]
-    fn wait_for_process_exit_returns_remaining_processes_after_timeout() {
-        assert_eq!(
-            wait_for_process_exit(&[10, 20], || vec![20], 0, 0),
-            vec![20]
-        );
-    }
-
-    #[test]
-    fn wait_for_process_start_returns_processes_after_retry() {
-        let mut scans = 0;
-        let process_ids = wait_for_process_start(
-            || {
-                scans += 1;
-                (scans == 2).then_some(vec![42]).unwrap_or_default()
-            },
-            100,
-            0,
-        );
-
-        assert_eq!(process_ids, vec![42]);
-        assert_eq!(scans, 2);
-    }
-
-    #[test]
-    fn wait_for_process_start_returns_empty_after_timeout() {
-        assert!(wait_for_process_start(Vec::new, 0, 0).is_empty());
-    }
 }

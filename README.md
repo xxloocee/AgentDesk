@@ -16,9 +16,7 @@
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
 </p>
 
-AgentDesk 是面向 OpenAI Codex / ChatGPT 桌面应用的外部启动器与管理工具。
-
-通过 Chromium DevTools Protocol 和本地辅助服务提供供应商切换、协议转换、会话管理与界面增强；不修改官方应用的 `app.asar`，也不向安装目录写入补丁文件。
+AgentDesk 是面向 OpenAI Codex / ChatGPT 桌面应用的外部启动器与管理工具。它通过 Chromium DevTools Protocol 和本地辅助服务提供供应商切换、协议转换、会话管理与界面增强，不修改官方应用的 `app.asar`，也不向安装目录写入补丁文件。
 
 ## 快速使用
 
@@ -102,7 +100,9 @@ AgentDesk 通过 GitHub Release 发布安装包。Windows 会生成 NSIS 安装�
 
 ### macOS 提示无法打开或已损坏
 
-当前安装包未签名/未公证时，macOS Gatekeeper 可能拦截，出现“已损坏，无法打开”的提示。
+当前安装包未签名/未公证时，macOS Gatekeeper 可能拦截，出现“已损坏，无法打开”的提示：
+
+![macOS 提示 AgentDesk 管理工具已损坏](docs/images/macos-damaged-warning.png)
 
 如果遇到该提示，可以在终端执行下面两条命令，解除苹果系统的安全隔离限制：
 
@@ -145,8 +145,8 @@ crates/
   codex-plus-core/              启动、注入、配置、更新、安装、桥接等核心逻辑
   codex-plus-data/              会话数据、导出、Provider 同步
 scripts/installer/
-    windows/AgentDesk.nsi       Windows NSIS 安装包
-    macos/package-dmg.sh        macOS DMG 打包
+  windows/AgentDesk.nsi     Windows NSIS 安装包
+  macos/package-dmg.sh          macOS DMG 打包
 ```
 
 ## 开源协议

@@ -1,8 +1,5 @@
 use codex_plus_core::models::{DeleteStatus, SessionRef};
-use codex_plus_data::{
-    BackupStore, SQLiteStorageAdapter, delete_local_from_paths,
-    move_codex_thread_workspace_from_paths,
-};
+use codex_plus_data::{BackupStore, SQLiteStorageAdapter, delete_local_from_paths};
 use rusqlite::Connection;
 use serde_json::json;
 use std::fs;
@@ -426,6 +423,182 @@ fn delete_codex_thread_schema_removes_related_rows_file_and_undo_restores_everyt
 }
 
 #[test]
+fn delete_codex_thread_removes_session_index_entry_and_undo_restores_it() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    let index_path = tmp.path().join("session_index.jsonl");
+    fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let index_lines = [
+        "{\"id\":\"t1\",\"thread_name\":\"Codex Thread\",\"updated_at\":\"2026-08-18T00:00:00Z\"}",
+        "{\"id\":\"other\",\"thread_name\":\"Keep me\",\"updated_at\":\"2026-08-18T00:00:01Z\"}",
+    ];
+    fs::write(&index_path, index_lines.join("\n") + "\n").unwrap();
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")))
+        .with_codex_home(tmp.path());
+
+    let deleted = adapter.delete_local(&session("local:t1", "Codex Thread"));
+
+    assert_eq!(deleted.status, DeleteStatus::LocalDeleted);
+    let index_text = fs::read_to_string(&index_path).unwrap();
+    assert!(index_text.contains("\"id\":\"other\""));
+    assert!(!index_text.contains("\"id\":\"t1\""));
+
+    let restored = adapter.undo(deleted.undo_token.as_deref().unwrap());
+
+    assert_eq!(restored.status, DeleteStatus::Undone);
+    let index_text = fs::read_to_string(&index_path).unwrap();
+    assert!(index_text.contains("\"id\":\"t1\""));
+    assert_eq!(index_text.matches("\"id\":\"t1\"").count(), 1);
+    assert_eq!(index_text.matches("\"id\":\"other\"").count(), 1);
+}
+
+#[test]
+fn delete_codex_thread_sqlite_dir_layout_removes_session_index_entry_and_undo_restores_it() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let sqlite_dir = home.join("sqlite");
+    fs::create_dir_all(&sqlite_dir).unwrap();
+    let db_path = sqlite_dir.join("codex-dev.db");
+    let rollout_path = home.join("rollout.jsonl");
+    let index_path = home.join("session_index.jsonl");
+    fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let index_lines = [
+        "{\"id\":\"t1\",\"thread_name\":\"Codex Thread\",\"updated_at\":\"2026-08-18T00:00:00Z\"}",
+        "{\"id\":\"other\",\"thread_name\":\"Keep me\",\"updated_at\":\"2026-08-18T00:00:01Z\"}",
+    ];
+    fs::write(&index_path, index_lines.join("\n") + "\n").unwrap();
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")))
+        .with_codex_home(home);
+
+    let deleted = adapter.delete_local(&session("local:t1", "Codex Thread"));
+
+    assert_eq!(deleted.status, DeleteStatus::LocalDeleted);
+    let index_text = fs::read_to_string(&index_path).unwrap();
+    assert!(index_text.contains("\"id\":\"other\""));
+    assert!(!index_text.contains("\"id\":\"t1\""));
+    assert_eq!(thread_count(&db_path, "t1"), 0);
+    assert!(!rollout_path.exists());
+
+    let restored = adapter.undo(deleted.undo_token.as_deref().unwrap());
+
+    assert_eq!(restored.status, DeleteStatus::Undone);
+    let index_text = fs::read_to_string(&index_path).unwrap();
+    assert!(index_text.contains("\"id\":\"t1\""));
+    assert_eq!(index_text.matches("\"id\":\"t1\"").count(), 1);
+    assert_eq!(index_text.matches("\"id\":\"other\"").count(), 1);
+    assert_eq!(thread_count(&db_path, "t1"), 1);
+}
+
+/// 删除成功后必须一并清 session_index.jsonl，否则重启后 UI 从索引读，
+/// 会话又冒出来、再删再冒（#1979）。
+///
+/// 三种 schema 里原先只有 delete_codex_thread 清了索引，这条覆盖 generic
+/// sessions 那条路径。
+#[test]
+fn delete_local_clears_the_session_index_for_generic_sessions() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let db_path = tmp.path().join("generic.sqlite");
+    create_supported_db(&db_path);
+    fs::write(
+        home.join("session_index.jsonl"),
+        "{\"id\":\"s1\",\"thread_name\":\"A\",\"updated_at\":\"2026-08-26T00:00:00Z\"}\n\
+{\"id\":\"keep\",\"thread_name\":\"B\",\"updated_at\":\"2026-08-26T00:00:00Z\"}\n",
+    )
+    .unwrap();
+
+    let result = SQLiteStorageAdapter::new(db_path, BackupStore::new(tmp.path().join("backups")))
+        .with_codex_home(&home)
+        .delete_local(&session("s1", "Session"));
+
+    assert_eq!(
+        result.status,
+        DeleteStatus::LocalDeleted,
+        "{}",
+        result.message
+    );
+    let index_text = fs::read_to_string(home.join("session_index.jsonl")).unwrap();
+    assert!(!index_text.contains("\"s1\""), "删除后索引里不该还有该会话");
+    assert!(index_text.contains("keep"), "其它会话不该被误删");
+}
+
+/// 纯 API 模式（model_provider = "custom"）下 threads 表是空的，删除会话时每个
+/// 数据库都查不到记录，于是报「Thread not found in local storage」而会话行仍留在
+/// 列表里——因为 UI 读的是 session_index.jsonl，那条记录没人清（#1998）。
+///
+/// 数据库里没有不代表索引里没有：能从索引清掉就算删除成功。
+#[test]
+fn delete_local_from_paths_falls_back_to_session_index_when_no_database_row_exists() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    // 空库：模拟 API 密钥模式下 threads 表没有记录
+    let empty_db = tmp.path().join("empty.sqlite");
+    let unrelated_rollout = tmp.path().join("unrelated.jsonl");
+    fs::write(&unrelated_rollout, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&empty_db, &unrelated_rollout);
+    // 但索引里有这条会话
+    fs::write(
+        home.join("session_index.jsonl"),
+        "{\"id\":\"api-only\",\"thread_name\":\"A\",\"updated_at\":\"2026-08-26T00:00:00Z\"}\n\
+{\"id\":\"keep\",\"thread_name\":\"B\",\"updated_at\":\"2026-08-26T00:00:00Z\"}\n",
+    )
+    .unwrap();
+
+    let result = delete_local_from_paths(
+        vec![empty_db.clone()],
+        BackupStore::new(tmp.path().join("backups")),
+        &session("api-only", "Codex Thread"),
+        Some(home.as_path()),
+    );
+
+    assert_eq!(
+        result.status,
+        DeleteStatus::LocalDeleted,
+        "{}",
+        result.message
+    );
+    let index_text = fs::read_to_string(home.join("session_index.jsonl")).unwrap();
+    assert!(!index_text.contains("api-only"), "目标会话应从索引移除");
+    assert!(index_text.contains("keep"), "其它会话不该被误删");
+}
+
+/// 数据库和索引里都没有，才是真的找不到——不能因为加了兜底就把所有失败都吞掉。
+#[test]
+fn delete_local_from_paths_still_fails_when_neither_database_nor_index_has_the_thread() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let empty_db = tmp.path().join("empty.sqlite");
+    let unrelated_rollout = tmp.path().join("unrelated.jsonl");
+    fs::write(&unrelated_rollout, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&empty_db, &unrelated_rollout);
+    fs::write(
+        home.join("session_index.jsonl"),
+        "{\"id\":\"other\",\"thread_name\":\"C\",\"updated_at\":\"2026-08-26T00:00:00Z\"}\n",
+    )
+    .unwrap();
+
+    let result = delete_local_from_paths(
+        vec![empty_db],
+        BackupStore::new(tmp.path().join("backups")),
+        &session("missing", "Codex Thread"),
+        Some(home.as_path()),
+    );
+
+    assert_eq!(result.status, DeleteStatus::Failed);
+    assert!(
+        fs::read_to_string(home.join("session_index.jsonl"))
+            .unwrap()
+            .contains("other")
+    );
+}
+
+#[test]
 fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
     let tmp = tempdir().unwrap();
     let first_db = tmp.path().join("first.sqlite");
@@ -441,6 +614,7 @@ fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
         vec![first_db.clone(), second_db.clone()],
         BackupStore::new(tmp.path().join("backups")),
         &session("t1", "Codex Thread"),
+        None,
     );
 
     assert_eq!(result.status, DeleteStatus::LocalDeleted);
@@ -477,6 +651,7 @@ fn delete_local_from_paths_undo_restores_duplicate_threads_and_shared_rollout_to
         vec![old_db.clone(), new_db.clone()],
         backups.clone(),
         &session("t1", "Codex Thread"),
+        None,
     );
     let token = deleted.undo_token.as_deref().unwrap();
 
@@ -521,6 +696,7 @@ fn grouped_undo_preflights_all_databases_before_restoring_any() {
         vec![first_db.clone(), second_db.clone()],
         backups.clone(),
         &session("t1", "Codex Thread"),
+        None,
     );
     let token = deleted.undo_token.as_deref().unwrap();
     Connection::open(&second_db)
@@ -577,49 +753,6 @@ fn undo_rejects_source_database_outside_allowed_paths() {
 }
 
 #[test]
-fn move_thread_workspace_from_paths_uses_database_that_contains_thread() {
-    let tmp = tempdir().unwrap();
-    let stale_db = tmp.path().join("stale.sqlite");
-    let live_db = tmp.path().join("live.sqlite");
-    let stale_rollout = tmp.path().join("stale.jsonl");
-    let live_rollout = tmp.path().join("live.jsonl");
-    fs::write(&stale_rollout, "{\"type\":\"message\"}\n").unwrap();
-    fs::write(
-        &live_rollout,
-        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\",\"cwd\":\"/old/project\",\"title\":\"Codex Thread\"}}\n",
-    )
-    .unwrap();
-    create_codex_thread_db(&stale_db, &stale_rollout);
-    create_codex_thread_db(&live_db, &live_rollout);
-    Connection::open(&stale_db)
-        .unwrap()
-        .execute("DELETE FROM threads WHERE id = 't1'", [])
-        .unwrap();
-
-    let result = move_codex_thread_workspace_from_paths(
-        vec![stale_db.clone(), live_db.clone()],
-        BackupStore::new(tmp.path().join("backups")),
-        &session("local:t1", "Codex Thread"),
-        "/new/project",
-    );
-
-    assert_eq!(result["status"], "moved");
-    assert_eq!(result["target_cwd"], "/new/project");
-    assert_eq!(result["db_path"], live_db.to_string_lossy().to_string());
-    assert_eq!(
-        Connection::open(&live_db)
-            .unwrap()
-            .query_row("SELECT cwd FROM threads WHERE id = 't1'", [], |row| row
-                .get::<_, String>(
-                0
-            ))
-            .unwrap(),
-        "/new/project"
-    );
-    assert_eq!(thread_count(&stale_db, "t1"), 0);
-}
-
-#[test]
 fn list_local_sessions_reads_codex_threads_ordered_by_update_time() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
@@ -651,10 +784,57 @@ fn list_local_sessions_reads_codex_threads_ordered_by_update_time() {
     assert_eq!(sessions[0].model_provider, "custom");
     assert!(sessions[0].archived);
     assert_eq!(sessions[1].id, "t1");
+    assert_eq!(adapter.list_local_session_ids().unwrap(), ["t1", "t2"]);
 
     let first_page = adapter.list_local_sessions_limited(1).unwrap();
     assert_eq!(first_page.len(), 1);
     assert_eq!(first_page[0].id, "t2");
+}
+
+#[test]
+fn list_local_sessions_hides_spawned_subagent_threads() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let backup = BackupStore::new(tmp.path().join("backups"));
+    let adapter = SQLiteStorageAdapter::new(&db_path, backup);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, title TEXT, cwd TEXT, archived INTEGER, updated_at_ms INTEGER)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO threads VALUES ('parent', 'parent.jsonl', 'Parent', 'C:/a', 0, 100)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO threads VALUES ('child', 'child.jsonl', 'The following is the Codex agent history', 'C:/a', 0, 200)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO thread_spawn_edges VALUES ('parent', 'child')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let sessions = adapter.list_local_sessions().unwrap();
+
+    assert_eq!(
+        sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        ["parent"]
+    );
+    assert_eq!(adapter.list_local_session_ids().unwrap(), ["parent"]);
 }
 
 #[test]
@@ -686,6 +866,11 @@ fn list_local_sessions_reads_codex_automation_runs_schema() {
         [],
     )
     .unwrap();
+    db.execute(
+        "INSERT INTO automation_runs VALUES ('', 'running', 'No thread', 'C:/c', 500, 600)",
+        [],
+    )
+    .unwrap();
     drop(db);
 
     let sessions = adapter.list_local_sessions().unwrap();
@@ -697,6 +882,7 @@ fn list_local_sessions_reads_codex_automation_runs_schema() {
     assert!(sessions[0].archived);
     assert_eq!(sessions[0].db_path, db_path.to_string_lossy());
     assert_eq!(sessions[1].id, "t1");
+    assert_eq!(adapter.list_local_session_ids().unwrap(), ["t1", "t2"]);
 }
 
 #[test]
@@ -864,7 +1050,7 @@ fn missing_db_and_unsupported_schema_return_failed_results() {
 }
 
 #[test]
-fn archived_lookup_workspace_move_and_sort_keys_match_expected_shape() {
+fn archived_lookup_matches_expected_shape() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
     let rollout_path = tmp.path().join("rollout.jsonl");
@@ -887,36 +1073,6 @@ fn archived_lookup_workspace_move_and_sort_keys_match_expected_shape() {
     assert_eq!(
         adapter.find_archived_thread_by_title("Codex Thread 2026年5月9日，1:19 · RustGUI"),
         Some(session("t1", "Codex Thread"))
-    );
-
-    let moved =
-        adapter.move_codex_thread_workspace(&session("local:t1", "Codex Thread"), "/new/project");
-    assert_eq!(moved["status"], "moved");
-    assert_eq!(moved["previous_cwd"], "/old/project");
-    assert_eq!(moved["target_cwd"], "/new/project");
-    assert_eq!(moved["rollout_updated"], true);
-    assert_eq!(moved["updated_at"], 100);
-    assert_eq!(moved["updated_at_ms"], 100000);
-    let text = fs::read_to_string(&rollout_path).unwrap();
-    assert!(text.contains("\"id\":\"t1\",\"cwd\":\"/new/project\""));
-    assert!(text.contains("\"id\":\"other\",\"cwd\":\"/old/project\""));
-
-    assert_eq!(
-        adapter.codex_thread_sort_key(&session("local:t1", "Codex Thread")),
-        json!({"status": "ok", "session_id": "t1", "updated_at": 100, "updated_at_ms": 100000, "created_at_ms": null})
-    );
-    assert_eq!(
-        adapter.codex_thread_sort_keys(&[
-            session("local:t2", "Second"),
-            session("local:t1", "Codex Thread")
-        ]),
-        json!({
-            "status": "ok",
-            "sort_keys": [
-                {"session_id": "t2", "updated_at": 200, "updated_at_ms": 200000, "created_at_ms": null},
-                {"session_id": "t1", "updated_at": 100, "updated_at_ms": 100000, "created_at_ms": null}
-            ]
-        })
     );
 
     assert_eq!(

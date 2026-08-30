@@ -10,7 +10,7 @@ Name "AgentDesk"
 OutFile "${ROOT}\dist\windows\AgentDesk-${VERSION}-windows-x64-setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\AgentDesk"
 InstallDirRegKey HKCU "Software\AgentDesk" "InstallDir"
-RequestExecutionLevel admin
+RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
 !define MUI_ICON "${ROOT}\apps\codex-plus-manager\src-tauri\icons\icon.ico"

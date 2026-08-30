@@ -7,6 +7,7 @@ use super::{
 
 const UNINSTALL_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentDesk";
 const URL_PROTOCOL_SUBKEY: &str = r"Software\Classes\codexplusplus";
+const DREAM_SKIN_URL_PROTOCOL_SUBKEY: &str = r"Software\Classes\dreamskin";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowsEntrypointPlan {
@@ -88,6 +89,16 @@ pub fn uninstall_shortcuts(options: &InstallOptions) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&plan.silent_shortcut);
     let _ = std::fs::remove_file(&plan.manager_shortcut);
     unregister_url_protocol_if_owned(&plan.manager_path)?;
+    let _ = crate::windows_integration::delete_current_user_key(&format!(
+        r"{DREAM_SKIN_URL_PROTOCOL_SUBKEY}\shell\open\command"
+    ));
+    let _ = crate::windows_integration::delete_current_user_key(&format!(
+        r"{DREAM_SKIN_URL_PROTOCOL_SUBKEY}\shell\open"
+    ));
+    let _ = crate::windows_integration::delete_current_user_key(&format!(
+        r"{DREAM_SKIN_URL_PROTOCOL_SUBKEY}\shell"
+    ));
+    let _ = crate::windows_integration::delete_current_user_key(DREAM_SKIN_URL_PROTOCOL_SUBKEY);
     let _ = crate::windows_integration::delete_current_user_key(UNINSTALL_SUBKEY);
     Ok(())
 }
@@ -144,18 +155,28 @@ fn write_uninstall_registration(plan: &WindowsEntrypointPlan) -> anyhow::Result<
 
 #[cfg(windows)]
 fn register_url_protocol(manager_path: &str) -> anyhow::Result<()> {
-    crate::windows_integration::set_current_user_string_value(
+    register_url_protocol_key(
         URL_PROTOCOL_SUBKEY,
-        "",
         "URL:AgentDesk Import Protocol",
+        manager_path,
     )?;
+    register_url_protocol_key(
+        DREAM_SKIN_URL_PROTOCOL_SUBKEY,
+        "URL:DreamSkin Community Theme Protocol",
+        manager_path,
+    )
+}
+
+#[cfg(windows)]
+fn register_url_protocol_key(
+    key: &str,
+    description: &str,
+    manager_path: &str,
+) -> anyhow::Result<()> {
+    crate::windows_integration::set_current_user_string_value(key, "", description)?;
+    crate::windows_integration::set_current_user_string_value(key, "URL Protocol", "")?;
     crate::windows_integration::set_current_user_string_value(
-        URL_PROTOCOL_SUBKEY,
-        "URL Protocol",
-        "",
-    )?;
-    crate::windows_integration::set_current_user_string_value(
-        &format!(r"{URL_PROTOCOL_SUBKEY}\shell\open\command"),
+        &format!(r"{key}\shell\open\command"),
         "",
         &format!("\"{manager_path}\" \"%1\""),
     )?;
@@ -190,19 +211,6 @@ fn url_protocol_command_owned_by(manager_path: &str, values: &[(String, Option<S
     })
 }
 
-fn default_icon_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .map(|path| path.join("codex-plus-plus.ico"))
-        .unwrap_or_else(|| PathBuf::from("codex-plus-plus.ico"))
-}
-
-#[allow(dead_code)]
-fn _entrypoint_names() -> (&'static str, &'static str) {
-    (SILENT_NAME, MANAGER_NAME)
-}
-
 #[cfg(test)]
 mod tests {
     use super::url_protocol_command_owned_by;
@@ -227,4 +235,17 @@ mod tests {
             &other
         ));
     }
+}
+
+fn default_icon_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|path| path.join("codex-plus-plus.ico"))
+        .unwrap_or_else(|| PathBuf::from("codex-plus-plus.ico"))
+}
+
+#[allow(dead_code)]
+fn _entrypoint_names() -> (&'static str, &'static str) {
+    (SILENT_NAME, MANAGER_NAME)
 }

@@ -22,12 +22,25 @@ const trackedFiles = [
   "README_EN.md",
   "CONTRIBUTING.md",
   "HANDOVER.md",
+  "docs/changelog.html",
+  "docs/changelog.js",
+  "docs/index.html",
+  "docs/site.js",
+  "services/share-site/README.md",
+  "services/share-site/app.js",
+  "services/share-site/index.html",
+  "assets/installer/macos/dmg-background.svg",
   "assets/inject/renderer-inject.js",
   "assets/inject/stepwise-inject.js",
+  "assets/inject/floating-panel/core/appearance-runtime.js",
+  "assets/inject/floating-panel/core/views.js",
   "apps/codex-plus-manager/index.html",
   "apps/codex-plus-manager/src/App.tsx",
+  "apps/codex-plus-manager/src/dream-skin.test.ts",
   "apps/codex-plus-manager/src/i18n-en.ts",
   "apps/codex-plus-manager/src/presets.ts",
+  "apps/codex-plus-manager/src/renderer-inject.test.ts",
+  "apps/codex-plus-manager/src-tauri/Info.plist",
   "apps/codex-plus-manager/src-tauri/tauri.conf.json",
   "apps/codex-plus-manager/src-tauri/src/lib.rs",
   "apps/codex-plus-manager/src-tauri/src/commands.rs",
@@ -37,13 +50,22 @@ const trackedFiles = [
   "apps/codex-plus-mobile-relay/src/main.rs",
   "crates/codex-plus-core/src/ads.rs",
   "crates/codex-plus-core/src/assets.rs",
+  "crates/codex-plus-core/src/connect/app_server.rs",
+  "crates/codex-plus-core/src/connect/mod.rs",
+  "crates/codex-plus-core/src/dream_skin_community.rs",
+  "crates/codex-plus-core/src/dream_skin_library.rs",
+  "crates/codex-plus-core/src/dream_skin_market.rs",
+  "crates/codex-plus-core/src/dream_skin_runtime.rs",
   "crates/codex-plus-core/src/install/mod.rs",
   "crates/codex-plus-core/src/install/macos.rs",
   "crates/codex-plus-core/src/install/windows.rs",
   "crates/codex-plus-core/src/launcher.rs",
   "crates/codex-plus-core/src/paths.rs",
   "crates/codex-plus-core/src/script_market.rs",
+  "crates/codex-plus-core/src/session_share.rs",
+  "crates/codex-plus-core/src/share.rs",
   "crates/codex-plus-core/src/update.rs",
+  "crates/codex-plus-core/src/user_scripts.rs",
   "crates/codex-plus-core/src/zed_remote.rs",
   "crates/codex-plus-core/tests/ads.rs",
   "crates/codex-plus-core/tests/cdp_bridge.rs",
@@ -61,6 +83,7 @@ const obsoleteAssets = [
   "assets/images/rawchat-sponsor.jpg",
   "assets/images/sponsor-alipay.jpg",
   "assets/images/sponsor-wechat.jpg",
+  "docs/CNAME",
   "docs/images/discussion-group-qr.jpg",
   "docs/images/sponsor-0029.svg",
   "docs/images/sponsor-aigocode.png",
@@ -68,14 +91,19 @@ const obsoleteAssets = [
   "docs/images/sponsor-aihub2api.png",
   "docs/images/sponsor-alipay.jpg",
   "docs/images/sponsor-apikey-fun.png",
+  "docs/images/sponsor-apimart.png",
   "docs/images/sponsor-baikewei-ai.jpg",
   "docs/images/sponsor-byteplus.png",
   "docs/images/sponsor-cubence.png",
+  "docs/images/sponsor-deepkey.png",
   "docs/images/sponsor-ergou-api.png",
+  "docs/images/sponsor-everyapi.png",
+  "docs/images/sponsor-fenno-ai.png",
   "docs/images/sponsor-jojocode.png",
   "docs/images/sponsor-jojocode.svg",
   "docs/images/sponsor-maolao-api.jpg",
   "docs/images/sponsor-packycode.png",
+  "docs/images/sponsor-qiniu-ai.png",
   "docs/images/sponsor-rawchat.svg",
   "docs/images/sponsor-runapi.png",
   "docs/images/sponsor-smallice.png",
@@ -90,6 +118,7 @@ const obsoleteAssets = [
 
 // 上游历史文件可能已被删除；除此之外，缺失目标都应让验证失败，避免错误 ref 也被报告为“验证通过”。
 const optionalUpstreamPaths = new Set([
+  "assets/inject/stepwise-inject.js",
   "crates/codex-plus-core/tests/cli_wrapper.rs",
 ]);
 
@@ -106,12 +135,25 @@ const brandReplaceFiles = new Set([
   "README_EN.md",
   "CONTRIBUTING.md",
   "HANDOVER.md",
+  "docs/changelog.html",
+  "docs/changelog.js",
+  "docs/index.html",
+  "docs/site.js",
+  "services/share-site/README.md",
+  "services/share-site/app.js",
+  "services/share-site/index.html",
+  "assets/installer/macos/dmg-background.svg",
   "assets/inject/renderer-inject.js",
   "assets/inject/stepwise-inject.js",
+  "assets/inject/floating-panel/core/appearance-runtime.js",
+  "assets/inject/floating-panel/core/views.js",
   "apps/codex-plus-manager/index.html",
   "apps/codex-plus-manager/src/App.tsx",
+  "apps/codex-plus-manager/src/dream-skin.test.ts",
   "apps/codex-plus-manager/src/i18n-en.ts",
   "apps/codex-plus-manager/src/presets.ts",
+  "apps/codex-plus-manager/src/renderer-inject.test.ts",
+  "apps/codex-plus-manager/src-tauri/Info.plist",
   "apps/codex-plus-manager/src-tauri/tauri.conf.json",
   "apps/codex-plus-manager/src-tauri/src/lib.rs",
   "apps/codex-plus-manager/src-tauri/src/commands.rs",
@@ -119,10 +161,19 @@ const brandReplaceFiles = new Set([
   "apps/codex-plus-manager/src-tauri/tests/windows_subsystem.rs",
   "apps/codex-plus-launcher/src/main.rs",
   "apps/codex-plus-mobile-relay/src/main.rs",
+  "crates/codex-plus-core/src/connect/app_server.rs",
+  "crates/codex-plus-core/src/connect/mod.rs",
+  "crates/codex-plus-core/src/dream_skin_community.rs",
+  "crates/codex-plus-core/src/dream_skin_library.rs",
+  "crates/codex-plus-core/src/dream_skin_market.rs",
+  "crates/codex-plus-core/src/dream_skin_runtime.rs",
   "crates/codex-plus-core/src/install/mod.rs",
   "crates/codex-plus-core/src/install/macos.rs",
   "crates/codex-plus-core/src/install/windows.rs",
   "crates/codex-plus-core/src/launcher.rs",
+  "crates/codex-plus-core/src/session_share.rs",
+  "crates/codex-plus-core/src/share.rs",
+  "crates/codex-plus-core/src/user_scripts.rs",
   "crates/codex-plus-core/src/zed_remote.rs",
   "crates/codex-plus-core/tests/cdp_bridge.rs",
   "crates/codex-plus-core/tests/installers.rs",
@@ -374,10 +425,12 @@ function patchScriptMarketRs(text) {
 }
 
 function patchPathsRs(text) {
-  return text.replace(
-    /const APP_STATE_DIR: &str = "[^"]+";/,
-    `const APP_STATE_DIR: &str = "${config.brand.stateDir}";`
-  );
+  return text
+    .replace(
+      /const APP_STATE_DIR: &str = "[^"]+";/,
+      `const APP_STATE_DIR: &str = "${config.brand.stateDir}";`
+    )
+    .replace(/\.codex-session-delete\//g, `${config.brand.stateDir}/`);
 }
 
 function patchRendererInject(text) {
@@ -446,6 +499,7 @@ function patchRendererInject(text) {
 }
 
 function patchManagerApp(text) {
+  const relayDescription = `统一的 AI 模型聚合与分发网关，支持 OpenAI、Claude、Grok 兼容接口。Codex 中转注入默认使用 ${config.officialRelay.baseUrl}。`;
   let next = text.replace(/重启 AgentDesk/g, "重启 Codex");
   if (!config.scriptMarket.enabled) {
     next = next.replace(
@@ -476,10 +530,6 @@ function patchManagerApp(text) {
       'recommendations: t("二狗子中转推荐"),'
     );
     next = next.replace(
-      /\n\s*const normal = items\.filter\(\(ad\) => ad\.type === "normal"\);/,
-      ""
-    );
-    next = next.replace(
       /\n\s*\{normal\.length > 0 \? \([\s\S]*?\) : null\}/,
       ""
     );
@@ -498,8 +548,10 @@ function patchManagerApp(text) {
   );
   next = next
     .replace(/官方中转站/g, "推荐中转")
+    .replace(/项目赞助商/g, "推荐中转")
     .replace(/<h2>JOJO Code<\/h2>/g, `<h2>${config.officialRelay.displayName}</h2>`)
     .replace(/<h2>AgentDesk<\/h2>/g, `<h2>${config.officialRelay.displayName}</h2>`)
+    .replace(/JOJO Code 提供[^"\r\n]+。/g, relayDescription)
     .replace(
       /\{t\("Codex\+\+ 官方中转站，主打稳定接入和划算价格，支持 GPT-5\.6 全系列、Fable 5、Sonnet 5、GPT-5\.5、GPT-5\.4、Claude Opus 4\.8、Claude Opus 4\.7、gpt-image-2 等模型与图像能力。"\)\}/g,
       `{t("统一的 AI 模型聚合与分发网关，支持 OpenAI、Claude、Grok 兼容接口。Codex 中转注入默认使用 ${config.officialRelay.baseUrl}。")}`
@@ -675,8 +727,21 @@ function patchWorkflow(text) {
   return text.replace(/npm install --package-lock=false/g, "npm ci");
 }
 
+function patchDocsIndex(text) {
+  return text.replace(
+    /\s*<a href="https:\/\/t\.me\/[^"]+" target="_blank" rel="noreferrer">Telegram<\/a>/,
+    ""
+  );
+}
+
 function patchI18nEn(text) {
+  const relayDescription = `统一的 AI 模型聚合与分发网关，支持 OpenAI、Claude、Grok 兼容接口。Codex 中转注入默认使用 ${config.officialRelay.baseUrl}。`;
   return text
+    .replace(
+      /"JOJO Code 提供[^"\r\n]+。":\s*"JOJO Code provides[^"\r\n]+\.",/,
+      `"${relayDescription}": "Unified AI model gateway supporting OpenAI, Claude, and Grok compatible APIs. Codex relay injection uses ${config.officialRelay.baseUrl} by default.",`
+    )
+    .replace(/"项目赞助商":\s*"Project sponsor",/, '"推荐中转": "Recommended relay",')
     .replace(
       /"仅展示 AgentDesk 内置的二狗子中转推荐，不加载上游远程广告源":\s*"[^"]*",/,
       '"Ergouzi 二狗子模型中转服务": "Ergouzi AI model relay service",'
@@ -685,12 +750,21 @@ function patchI18nEn(text) {
       /"当前仅保留 Ergouzi 二狗子推荐，其他上游赞助商与远程广告已移除。":\s*"[^"]*",/,
       '"支持 OpenAI、Claude、Grok 兼容接口。": "Supports OpenAI, Claude, and Grok compatible APIs.",'
     )
-    .replace(/"重启 AgentDesk":\s*"Restart AgentDesk",/, '"重启 Codex": "Restart Codex",')
     .replace(/"打开 JOJO Code":\s*"Open JOJO Code",/, '"打开二狗子": "Open Ergouzi",')
     .replace(/^\s*"与 Codex 内插件菜单使用同一个远端广告源":\s*"[^"]*",\r?\n/m, "")
     .replace(/^\s*"普通推荐":\s*"[^"]*",\r?\n/m, "")
     .replace(/^\s*"其他推荐":\s*"[^"]*",\r?\n/m, "")
-    .replace(/^\s*"暂无其他推荐。":\s*"[^"]*",\r?\n/m, "");
+    .replace(/^\s*"暂无其他推荐。":\s*"[^"]*",\r?\n/m, "")
+    .replace(/重启 AgentDesk/g, "重启 Codex")
+    .replace(/Restart AgentDesk/g, "Restart Codex");
+}
+
+function patchManagerCommands(text) {
+  return text.replace(/重启 AgentDesk/g, "重启 Codex");
+}
+
+function patchRendererInjectTest(text) {
+  return text.split(String.raw`Codex\+\+`).join("AgentDesk");
 }
 
 function patchI18nKeys(text) {
@@ -721,10 +795,10 @@ function patchI18nKeys(text) {
 function patchCdpBridgeTest(text) {
   return text.replace(
     '    assert!(script.contains("https://discord.gg/y96kX7A76v"));\n    assert!(script.contains("data-codex-plus-discord"));\n',
-    '    let disabled_discord_url = format!("{}{}", "https://discord.gg/", "y96kX7A76v");\n    assert!(!script.contains(&disabled_discord_url));\n    assert!(script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));\n'
+    '    let disabled_discord_url = format!("{}{}", "https://discord.gg/", "y96kX7A76v");\n    assert!(!script.contains(&disabled_discord_url));\n'
   ).replace(
     '    assert!(!script.contains("https://discord.gg/y96kX7A76v"));\n    assert!(script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));\n',
-    '    let disabled_discord_url = format!("{}{}", "https://discord.gg/", "y96kX7A76v");\n    assert!(!script.contains(&disabled_discord_url));\n    assert!(script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));\n'
+    '    let disabled_discord_url = format!("{}{}", "https://discord.gg/", "y96kX7A76v");\n    assert!(!script.contains(&disabled_discord_url));\n'
   ).replace(
     /#\[test\]\nfn injection_script_fetches_ads_without_bridge\(\) \{[\s\S]*?\n\}/,
     `#[test]
@@ -743,6 +817,9 @@ fn injection_script_loads_ads_only_from_local_backend() {
   ).replace(
     '    assert!(!script.contains("xxloocee/Ad-List"));\n',
     '    let disabled_ad_list = concat!("Big", "PizzaV3/", "Ad-List");\n    assert!(!script.contains(&disabled_ad_list));\n'
+  ).replace(
+    '    assert!(script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));\n',
+    ""
   );
 }
 
@@ -772,6 +849,9 @@ function transform(relativePath, text) {
     case "README_EN.md":
       next = patchReadme(next, "en");
       break;
+    case "docs/index.html":
+      next = patchDocsIndex(next);
+      break;
     case "CONTRIBUTING.md":
     case "AGENTS.md":
     case "HANDOVER.md":
@@ -784,8 +864,14 @@ function transform(relativePath, text) {
       next = patchManagerApp(next);
       next = next.replace('<div className="brand-mark">C++</div>', '<div className="brand-mark">AD</div>');
       break;
+    case "apps/codex-plus-manager/src-tauri/src/commands.rs":
+      next = patchManagerCommands(next);
+      break;
     case "apps/codex-plus-manager/src/presets.ts":
       next = patchPresets(next);
+      break;
+    case "apps/codex-plus-manager/src/renderer-inject.test.ts":
+      next = patchRendererInjectTest(next);
       break;
     case "apps/codex-plus-manager/src/i18n-en.ts":
       next = patchI18nEn(next);
