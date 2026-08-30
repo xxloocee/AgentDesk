@@ -433,11 +433,8 @@ function patchUpdateRs(text) {
 function patchScriptMarketRs(text) {
   const url = config.scriptMarket.enabled ? config.scriptMarket.indexUrl : "";
   return text.replace(
-    /pub const DEFAULT_MARKET_INDEX_URL: &str =\s*"[^"]+";/,
-    `pub const DEFAULT_MARKET_INDEX_URL: &str =\n    "${url}";`
-  ).replace(
-    /pub const DEFAULT_MARKET_INDEX_URL: &str =\s*"[^"]+"\s*;/,
-    `pub const DEFAULT_MARKET_INDEX_URL: &str =\n    "${url}";`
+    /pub const DEFAULT_MARKET_INDEX_URL: &str =\s*"[^"]*"\s*;/,
+    `pub const DEFAULT_MARKET_INDEX_URL: &str = "${url}";`
   );
 }
 
@@ -894,16 +891,16 @@ function patchSettingsRs(text) {
 function patchDreamSkinMarketRs(text) {
   return text
     .replace(
-      /pub const DEFAULT_MARKET_INDEX_URL: &str =\n\s*"[^"]*";/,
-      `pub const DEFAULT_MARKET_INDEX_URL: &str =\n    "${config.dreamSkinSources.marketIndexUrl}";`
+      /pub const DEFAULT_MARKET_INDEX_URL: &str =\s*"[^"]*"\s*;/,
+      `pub const DEFAULT_MARKET_INDEX_URL: &str = "${config.dreamSkinSources.marketIndexUrl}";`
     )
     .replace(
-      /pub const DEFAULT_MARKET_RAW_BASE_URL: &str =\n\s*"[^"]*";/,
-      `pub const DEFAULT_MARKET_RAW_BASE_URL: &str =\n    "${config.dreamSkinSources.marketRawBaseUrl}";`
+      /pub const DEFAULT_MARKET_RAW_BASE_URL: &str =\s*"[^"]*"\s*;/,
+      `pub const DEFAULT_MARKET_RAW_BASE_URL: &str = "${config.dreamSkinSources.marketRawBaseUrl}";`
     )
     .replace(
-      /pub const DEFAULT_MARKET_REPOSITORY_URL: &str =\n\s*"[^"]*";/,
-      `pub const DEFAULT_MARKET_REPOSITORY_URL: &str =\n    "${config.dreamSkinSources.marketRepositoryUrl}";`
+      /pub const DEFAULT_MARKET_REPOSITORY_URL: &str =\s*"[^"]*"\s*;/,
+      `pub const DEFAULT_MARKET_REPOSITORY_URL: &str = "${config.dreamSkinSources.marketRepositoryUrl}";`
     )
     .replace(/"AgentDesk-Themes\/\{\}"/, '"AgentDeskThemeMarket/{}"');
 }

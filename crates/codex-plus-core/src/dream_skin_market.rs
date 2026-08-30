@@ -10,12 +10,9 @@ use sha2::{Digest, Sha256};
 use crate::dream_skin_library::{DreamSkinThemeDraft, DreamSkinThemeSummary};
 use crate::settings::DreamSkinThemeConfig;
 
-pub const DEFAULT_MARKET_INDEX_URL: &str =
-    "https://themes.agentdesk.invalid/index.json";
-pub const DEFAULT_MARKET_RAW_BASE_URL: &str =
-    "https://themes.agentdesk.invalid/";
-pub const DEFAULT_MARKET_REPOSITORY_URL: &str =
-    "";
+pub const DEFAULT_MARKET_INDEX_URL: &str = "https://themes.agentdesk.invalid/index.json";
+pub const DEFAULT_MARKET_RAW_BASE_URL: &str = "https://themes.agentdesk.invalid/";
+pub const DEFAULT_MARKET_REPOSITORY_URL: &str = "";
 
 const MARKET_CACHE_FILE: &str = "dream-skin/market/index.json";
 const MARKET_INSTALLS_FILE: &str = "dream-skin/market/installed.json";
