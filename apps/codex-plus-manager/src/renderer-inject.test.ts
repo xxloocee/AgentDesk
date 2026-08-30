@@ -127,7 +127,7 @@ describe("renderer injection header compatibility", () => {
     assert.doesNotMatch(renderer, /\n\s*refreshSessionCopyMenuItems\(\);/);
   });
 
-  it("adds an encrypted session sharing button to the active Codex conversation", async () => {
+  it("keeps encrypted session sharing implemented but unreachable from the UI", async () => {
     const renderer = await readFile(new URL("../../../assets/inject/renderer-inject.js", import.meta.url), "utf8");
 
     assert.match(renderer, /sessionShareButtonClass\s*=\s*"codex-session-share-button"/);
@@ -148,6 +148,8 @@ describe("renderer injection header compatibility", () => {
     assert.match(renderer, /function sessionActionTrigger\(row\)/);
     assert.match(renderer, /const sessionMenuEnabled = codexPlusBackendSettings\.enhancementsEnabled !== false/);
     assert.doesNotMatch(renderer, /window\.location\.(?:href|assign)\s*=\s*[^;]*markdown/);
+    assert.doesNotMatch(renderer, /\n\s*installSessionShareButton\(\);/);
+    assert.doesNotMatch(renderer, /\n\s*installSessionShareImportListener\(\);/);
   });
 
   it("automatically renames a session through the native title suggestion", async () => {

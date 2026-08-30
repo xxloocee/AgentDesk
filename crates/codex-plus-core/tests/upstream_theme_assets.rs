@@ -83,36 +83,30 @@ fn bundled_target_renderers_and_styles_remain_byte_exact() {
 }
 
 #[test]
-fn bundled_skin_pack_theme_files_remain_byte_exact() {
-    for (path, hash) in [
-        (
-            "caishen-lite",
-            "379CB601522E7A5C2FC906E3D8BD5C7C64385FBD2A428798F8D169DEB7026F2E",
-        ),
-        (
-            "caishen-max",
-            "0CFF815EC9582B88ECF4AD9E7562D7DFF32904FA8F09338811397960D62FD7D4",
-        ),
-        (
-            "caishen-readable",
-            "EB1FFD4F2F49137B4AEDDBED435513D42685C8ED9E97DF644C693FD7859CC62D",
-        ),
-        (
-            "export-night",
-            "C312329AABEE84B9A8443B08D4DB64863EC49DEEA3C7F7C942B57E4391B87B59",
-        ),
-        (
-            "global-founder-bright",
-            "EAFB018494225ABABD83AE0E7B940E3F565232CF8F30C53AAFA63E7652178810",
-        ),
-        (
-            "mythic-guardian-noir",
-            "2A57716D0161F7405D713912BCD0CD329038657518537F3EFDB5F7EE53DBAE3D",
-        ),
+fn bundled_skin_pack_themes_do_not_include_promotional_metadata() {
+    for theme_id in [
+        "caishen-lite",
+        "caishen-max",
+        "caishen-readable",
+        "export-night",
+        "global-founder-bright",
+        "mythic-guardian-noir",
     ] {
-        assert_sha256(
-            &format!("assets/inject/upstream/skin-packs/packs/{path}/theme.json"),
-            hash,
-        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(format!(
+                "assets/inject/upstream/skin-packs/packs/{theme_id}/theme.json"
+            ));
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let theme: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+        for key in ["promoTitle", "promoSub", "promoUrl"] {
+            assert!(
+                theme.get(key).is_none(),
+                "bundled theme still contains {key}: {}",
+                path.display()
+            );
+        }
     }
 }

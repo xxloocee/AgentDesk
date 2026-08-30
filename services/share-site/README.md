@@ -1,20 +1,22 @@
 # AgentDesk Share
 
-Cloudflare Pages + Workers KV deployment for encrypted session sharing.
+Cloudflare Pages + Workers KV reference deployment for encrypted session sharing. AgentDesk does not publish this service by default.
+
+The AgentDesk session-share entry remains disabled until a self-owned deployment is configured.
 
 ## Cloudflare bindings
 
-- Pages project: `codexpp-share`
+- Pages project: `agentdesk-share`
 - KV binding: `SHARES`
-- Custom domain: `share.codexpp.cc`
+- Custom domain: not configured
 
 The browser encrypts content with AES-256-GCM. The encryption key stays in the
 URL fragment and is not sent to the server. KV records expire after 1, 7, or 30
 days and can be revoked with a separate delete token stored in the creator's
 browser.
 
-The API also allows cross-origin requests from the Codex desktop renderer so
-the injected session-share button can create links without sending plaintext.
+When explicitly enabled, the API allows cross-origin requests from the Codex desktop
+renderer so clients can create links without sending plaintext.
 
 ## Limits
 

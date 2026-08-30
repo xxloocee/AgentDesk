@@ -11,6 +11,10 @@
     "issues": "https://github.com/xxloocee/AgentDesk/issues",
     "latestJson": "https://github.com/xxloocee/AgentDesk/releases/latest/download/latest.json"
   },
+  "website": {
+    "baseUrl": "https://xxloocee.github.io/AgentDesk",
+    "imageUrl": "https://xxloocee.github.io/AgentDesk/images/codex-plus-plus.png"
+  },
   "recommendations": {
     "mode": "builtin-only"
   },
@@ -21,9 +25,22 @@
     "baseUrl": "https://ergouzi.life/v1"
   },
   "scriptMarket": {
-    "enabled": true,
-    "repositoryUrl": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
-    "indexUrl": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/index.json"
+    "enabled": false,
+    "repositoryUrl": "",
+    "indexUrl": ""
+  },
+  "dreamSkinSources": {
+    "enabled": false,
+    "marketIndexUrl": "https://themes.agentdesk.invalid/index.json",
+    "marketRawBaseUrl": "https://themes.agentdesk.invalid/",
+    "marketRepositoryUrl": "",
+    "communityApiOrigin": "https://community.agentdesk.invalid",
+    "communityGalleryUrl": "",
+    "communityStudioUrl": ""
+  },
+  "sessionShare": {
+    "enabled": false,
+    "pagesProject": "agentdesk-share"
   },
   "support": {
     "enabled": false

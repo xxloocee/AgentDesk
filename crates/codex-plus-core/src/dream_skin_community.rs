@@ -8,9 +8,9 @@ use sha2::{Digest, Sha256};
 
 use crate::dream_skin_library::DreamSkinThemeSummary;
 
-pub const COMMUNITY_API_ORIGIN: &str = "https://api.dreamskin.cc";
-pub const COMMUNITY_GALLERY_URL: &str = "https://dreamskin.cc/gallery";
-pub const COMMUNITY_STUDIO_URL: &str = "https://dreamskin.cc/studio";
+pub const COMMUNITY_API_ORIGIN: &str = "https://community.agentdesk.invalid";
+pub const COMMUNITY_GALLERY_URL: &str = "";
+pub const COMMUNITY_STUDIO_URL: &str = "";
 
 const CACHE_FILE: &str = "dream-skin/community/catalog.json";
 const PENDING_LINK_FILE: &str = "dream-skin/community/pending-apply.json";
@@ -419,10 +419,7 @@ fn append_warning(warning: &mut String, message: String) {
 
 fn community_http_client(timeout: Duration) -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .user_agent(format!(
-            "AgentDesk/{} DreamSkin",
-            env!("CARGO_PKG_VERSION")
-        ))
+        .user_agent(format!("AgentDesk/{} DreamSkin", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(8))
         .timeout(timeout)
@@ -514,7 +511,7 @@ mod tests {
             "ver_1234abcd"
         );
         for invalid in [
-            "https://api.dreamskin.cc/v1/themes/ver_1234abcd",
+            "https://community.agentdesk.invalid/v1/themes/ver_1234abcd",
             "dreamskin://apply?version=ver_1234abcd&url=https://example.com",
             "dreamskin://apply/?version=ver_1234abcd&url=https://example.com",
             "dreamskin://apply//?version=ver_1234abcd",

@@ -319,18 +319,6 @@ impl Default for DreamSkinThemeConfig {
                 "image".to_string(),
                 Value::String("portal-hero.png".to_string()),
             );
-            extra_fields.insert(
-                "promoTitle".to_string(),
-                Value::String("感谢 Passion8 赞助".to_string()),
-            );
-            extra_fields.insert(
-                "promoSub".to_string(),
-                Value::String("passion8.cc".to_string()),
-            );
-            extra_fields.insert(
-                "promoUrl".to_string(),
-                Value::String("https://passion8.cc/register?aff=TuPe".to_string()),
-            );
         }
         Self {
             schema_version: default_dream_skin_schema_version(),

@@ -23,7 +23,9 @@ fn backend_settings_defaults_to_upstream_platform_theme_config() {
         assert_eq!(theme.name, "Dream Skin");
         assert_eq!(theme.tagline, "把喜欢的画面变成可交互的 Codex 工作台。");
         assert_eq!(theme.colors.as_ref().unwrap().accent, "#E25563");
-        assert_eq!(theme.extra_fields["promoSub"], "passion8.cc");
+        assert!(!theme.extra_fields.contains_key("promoTitle"));
+        assert!(!theme.extra_fields.contains_key("promoSub"));
+        assert!(!theme.extra_fields.contains_key("promoUrl"));
     }
     assert!(!settings.codex_app_dream_skin_paused);
 }
