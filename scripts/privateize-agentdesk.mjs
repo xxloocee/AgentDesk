@@ -432,9 +432,12 @@ function patchUpdateRs(text) {
 
 function patchScriptMarketRs(text) {
   const url = config.scriptMarket.enabled ? config.scriptMarket.indexUrl : "";
+  const declaration = url
+    ? `pub const DEFAULT_MARKET_INDEX_URL: &str =\n    "${url}";`
+    : 'pub const DEFAULT_MARKET_INDEX_URL: &str = "";';
   return text.replace(
     /pub const DEFAULT_MARKET_INDEX_URL: &str =\s*"[^"]*"\s*;/,
-    `pub const DEFAULT_MARKET_INDEX_URL: &str = "${url}";`
+    declaration
   );
 }
 
@@ -526,6 +529,10 @@ function localOnlyUserScriptsScreen() {
       <CardHead title={t("本地脚本")} detail={inventory?.enabled === false ? t("关闭") : t("开启")} />
       <CardContent>
         <Toolbar>
+          <Button onClick={() => void actions.importUserScript()}>
+            <Download className="h-4 w-4" />
+            {t("导入脚本")}
+          </Button>
           <Button onClick={() => void actions.refreshCurrent()} variant="secondary">
             <RefreshCw className="h-4 w-4" />
             {t("刷新本地")}
@@ -563,10 +570,19 @@ function patchManagerApp(text) {
         `${localOnlyUserScriptsScreen()}\n\n`
       );
   } else {
-    next = next.replace(
-      /const SCRIPT_MARKET_REPOSITORY_URL = "[^"]*";/,
-      `const SCRIPT_MARKET_REPOSITORY_URL = "${config.scriptMarket.repositoryUrl}";`
-    );
+    next = next
+      .replace(
+        /const SCRIPT_MARKET_REPOSITORY_URL = "[^"]*";/,
+        `const SCRIPT_MARKET_REPOSITORY_URL = "${config.scriptMarket.repositoryUrl}";`
+      )
+      .replace(
+        '{ id: "userScripts", label: t("本地脚本"), icon: FileCode2 },',
+        '{ id: "userScripts", label: t("脚本市场"), icon: FileCode2 },'
+      )
+      .replace(
+        '    if (next === "userScripts") {\n      await refreshSettings(true);\n      await refreshUserScriptInventory();',
+        '    if (next === "userScripts") {\n      await refreshSettings(true);\n      await refreshScriptMarket(true);\n      await refreshUserScriptInventory();'
+      );
   }
   if (config.recommendations.mode === "builtin-only") {
     next = next.replace(
@@ -1322,6 +1338,12 @@ function auditEntries(entries) {
   const allowedFragmentsByFile = {
     "README.md": ["[BigPizzaV3/CodexPlusPlus](https://github.com/BigPizzaV3/CodexPlusPlus)"],
     "README_EN.md": ["[BigPizzaV3/CodexPlusPlus](https://github.com/BigPizzaV3/CodexPlusPlus)"],
+    "apps/codex-plus-manager/src/App.tsx": config.scriptMarket.enabled
+      ? [config.scriptMarket.repositoryUrl]
+      : [],
+    "crates/codex-plus-core/src/script_market.rs": config.scriptMarket.enabled
+      ? [config.scriptMarket.indexUrl]
+      : [],
     // User-Agent 属于运行时协议标识，不要求随产品品牌改名。
     "crates/codex-plus-core/src/ads.rs": ['proxied_client("CodexPlusPlus")'],
     "crates/codex-plus-core/src/update.rs": [
@@ -1344,7 +1366,7 @@ function auditEntries(entries) {
   const forbiddenFragmentsByFile = {
     "apps/codex-plus-manager/src/App.tsx": [
       'className="session-share-import"',
-      "await refreshScriptMarket(true);",
+      ...(config.scriptMarket.enabled ? [] : ["await refreshScriptMarket(true);"]),
       "await refreshDreamSkinMarket(true);",
       "await refreshDreamSkinCommunity(true);",
       'aria-selected={themeView === "community"}',

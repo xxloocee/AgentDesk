@@ -25,9 +25,9 @@
     "baseUrl": "https://ergouzi.life/v1"
   },
   "scriptMarket": {
-    "enabled": false,
-    "repositoryUrl": "",
-    "indexUrl": ""
+    "enabled": true,
+    "repositoryUrl": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
+    "indexUrl": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/index.json"
   },
   "dreamSkinSources": {
     "enabled": false,

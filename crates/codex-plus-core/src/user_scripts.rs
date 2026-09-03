@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -143,6 +144,51 @@ impl UserScriptManager {
         config.scripts.insert(key.to_string(), enabled);
         self.save_config_unlocked(&config)?;
         Ok(config)
+    }
+
+    pub fn import_user_script(&self, source: &Path) -> anyhow::Result<PathBuf> {
+        let metadata = fs::metadata(source)
+            .with_context(|| format!("failed to read user script {}", source.display()))?;
+        if !metadata.is_file() {
+            anyhow::bail!("user script source must be a regular file");
+        }
+        if !source
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("js"))
+        {
+            anyhow::bail!("user script must use the .js extension");
+        }
+        let file_name = source
+            .file_name()
+            .filter(|value| !value.is_empty())
+            .context("user script file name is missing")?;
+        fs::create_dir_all(&self.user_dir).with_context(|| {
+            format!(
+                "failed to create user script directory {}",
+                self.user_dir.display()
+            )
+        })?;
+        let destination = self.user_dir.join(file_name);
+        let contents = fs::read(source)
+            .with_context(|| format!("failed to read user script {}", source.display()))?;
+        let mut target = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .with_context(|| {
+                format!(
+                    "user script {} already exists or cannot be created",
+                    destination.display()
+                )
+            })?;
+        if let Err(error) = target.write_all(&contents) {
+            drop(target);
+            let _ = fs::remove_file(&destination);
+            return Err(error)
+                .with_context(|| format!("failed to write user script {}", destination.display()));
+        }
+        Ok(destination)
     }
 
     pub fn delete_user_script(&self, key: &str) -> anyhow::Result<UserScriptConfig> {
@@ -323,7 +369,11 @@ impl UserScriptManager {
         let mut paths = entries
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("js"))
+            .filter(|path| {
+                path.extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("js"))
+            })
             .collect::<Vec<_>>();
         paths.sort_by_key(|path| {
             path.file_name()

@@ -395,7 +395,7 @@ type RelayProtocol = "responses" | "chatCompletions";
 type RelayMode = "official" | "mixedApi" | "pureApi" | "aggregate";
 type RelaySessionProvider = "custom" | "openai";
 const CHAT_UPSTREAM_BASE_URL_KEY = "codex_plus_chat_base_url";
-const SCRIPT_MARKET_REPOSITORY_URL = "";
+const SCRIPT_MARKET_REPOSITORY_URL = "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket";
 
 type UserScriptInventory = {
   enabled?: boolean;
@@ -979,7 +979,7 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
   { id: "dreamSkin", label: t("皮肤管理"), icon: Palette },
   { id: "zedRemote", label: t("Zed 远程项目"), icon: ExternalLink },
   { id: "skills", label: t("Skills 技能"), icon: BookOpen },
-  { id: "userScripts", label: t("本地脚本"), icon: FileCode2 },
+  { id: "userScripts", label: t("脚本市场"), icon: FileCode2 },
   { id: "recommendations", label: t("推荐内容"), icon: ExternalLink },
   { id: "maintenance", label: t("安装维护"), icon: Wrench },
   { id: "about", label: t("关于"), icon: Info },
@@ -1286,6 +1286,29 @@ export function App() {
       setScriptMarket((current) => syncMarketInstalledState(current, result.user_scripts));
     }
     return result;
+  };
+
+  const importUserScript = async () => {
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        title: t("选择用户脚本"),
+        multiple: false,
+        directory: false,
+        filters: [{ name: "JavaScript", extensions: ["js"] }],
+      });
+    } catch (error) {
+      showNotice(t("本地脚本"), tf("打开选择器失败：{0}", [stringifyError(error)]), "failed");
+      return;
+    }
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path) return;
+    const result = await run(() => call<SettingsResult>("import_user_script", { path }));
+    if (result) {
+      setSettings(result);
+      setScriptMarket((current) => syncMarketInstalledState(current, result.user_scripts));
+      showResultNotice(t("本地脚本"), result);
+    }
   };
 
   const installMarketScript = async (id: string) => {
@@ -2179,6 +2202,7 @@ export function App() {
     if (next === "settings") await refreshSettings(true);
     if (next === "userScripts") {
       await refreshSettings(true);
+      await refreshScriptMarket(true);
       await refreshUserScriptInventory();
     }
     if (next === "recommendations") await refreshAds(true);
@@ -3375,6 +3399,7 @@ export function App() {
       refreshAds,
       refreshScriptMarket,
       refreshUserScriptInventory,
+      importUserScript,
       installMarketScript,
       setUserScriptEnabled,
       deleteUserScript,
@@ -3787,6 +3812,7 @@ type Actions = {
   refreshAds: () => Promise<void>;
   refreshScriptMarket: () => Promise<void>;
   refreshUserScriptInventory: () => Promise<SettingsResult | null>;
+  importUserScript: () => Promise<void>;
   installMarketScript: (id: string) => Promise<void>;
   setUserScriptEnabled: (key: string, enabled: boolean) => Promise<void>;
   deleteUserScript: (key: string) => Promise<void>;
@@ -6672,24 +6698,127 @@ function SkillBackupManager({ backups, actions }: { backups: SkillBackup[]; acti
   );
 }
 
-function UserScriptsScreen({ settings, actions }: { settings: SettingsResult | null; market: ScriptMarketResult | null; actions: Actions }) {
+function UserScriptsScreen({ settings, market, actions }: { settings: SettingsResult | null; market: ScriptMarketResult | null; actions: Actions }) {
   const inventory = settings?.user_scripts;
   const scripts = inventory?.scripts ?? [];
+  const marketScripts = market?.market.scripts ?? [];
+  const [marketSearch, setMarketSearch] = useState("");
+  const [marketView, setMarketView] = useState<"grid" | "list">("grid");
+  const filteredMarketScripts = useMemo(() => {
+    const query = marketSearch.trim().toLocaleLowerCase();
+    if (!query) return marketScripts;
+    return marketScripts.filter((script) => {
+      const haystack = [
+        script.name,
+        script.author,
+        script.description,
+        script.version,
+        script.homepage,
+        ...script.tags,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLocaleLowerCase();
+      return haystack.includes(query);
+    });
+  }, [marketSearch, marketScripts]);
+  const installedCount = marketScripts.filter((script) => script.installed).length;
   return (
-    <Panel>
-      <CardHead title={t("本地脚本")} detail={inventory?.enabled === false ? t("关闭") : t("开启")} />
-      <CardContent>
-        <Toolbar>
-          <Button onClick={() => void actions.refreshCurrent()} variant="secondary">
-            <RefreshCw className="h-4 w-4" />
-            {t("刷新本地")}
-          </Button>
-        </Toolbar>
-        <div className="table">
-          {scripts.length ? scripts.map((script) => <ScriptRow key={script.key} script={script} actions={actions} />) : <div className="empty">{t("未发现用户脚本。")}</div>}
-        </div>
-      </CardContent>
-    </Panel>
+    <>
+      <Panel>
+        <CardHead title={t("脚本市场")} detail={tf("{0} 个市场脚本，已安装 {1} 个，本地整体 {2}", [marketScripts.length, installedCount, inventory?.enabled === false ? t("关闭") : t("开启")])} />
+        <CardContent>
+          <div className="metric-list">
+            <Metric label={t("市场状态")} value={market?.market.message ?? t("尚未刷新")} />
+            <Metric label={t("远程脚本")} value={tf("{0} 个", [marketScripts.length])} />
+            <Metric label={t("已安装")} value={tf("{0} 个", [installedCount])} />
+            <Metric label={t("本地整体")} value={inventory?.enabled === false ? t("关闭") : t("开启")} />
+          </div>
+          <Toolbar>
+            <Button onClick={() => void actions.refreshScriptMarket()}>
+              <RefreshCw className="h-4 w-4" />
+              {t("刷新市场")}
+            </Button>
+            <Button onClick={() => void actions.importUserScript()} variant="secondary">
+              <Download className="h-4 w-4" />
+              {t("导入脚本")}
+            </Button>
+            <Button onClick={() => void actions.openExternalUrl(SCRIPT_MARKET_REPOSITORY_URL)} variant="secondary">
+              <ExternalLink className="h-4 w-4" />
+              {t("投稿")}
+            </Button>
+            <Button onClick={() => void actions.refreshCurrent()} variant="secondary">
+              <RefreshCw className="h-4 w-4" />
+              {t("刷新本地")}
+            </Button>
+          </Toolbar>
+        </CardContent>
+      </Panel>
+      <Panel>
+        <CardHead
+          title={t("市场脚本")}
+          detail={
+            market?.market.updatedAt
+              ? tf("清单更新时间：{0}，当前显示 {1} / {2}", [market.market.updatedAt, filteredMarketScripts.length, marketScripts.length])
+              : t("从 GitHub 静态清单加载")
+          }
+        />
+        <CardContent>
+          <div className="script-market-toolbar">
+            <div className="script-market-search">
+              <Search className="h-4 w-4" />
+              <Input
+                aria-label={t("搜索市场脚本")}
+                onChange={(event) => setMarketSearch(event.currentTarget.value)}
+                placeholder={t("搜索名称、作者、描述或标签")}
+                value={marketSearch}
+              />
+            </div>
+            <div className="script-market-view-toggle" role="group" aria-label={t("脚本市场排版")}>
+              <Button
+                aria-pressed={marketView === "grid"}
+                onClick={() => setMarketView("grid")}
+                size="sm"
+                variant={marketView === "grid" ? "secondary" : "ghost"}
+              >
+                <LayoutGrid className="h-4 w-4" />
+                {t("板块")}
+              </Button>
+              <Button
+                aria-pressed={marketView === "list"}
+                onClick={() => setMarketView("list")}
+                size="sm"
+                variant={marketView === "list" ? "secondary" : "ghost"}
+              >
+                <List className="h-4 w-4" />
+                {t("列表")}
+              </Button>
+            </div>
+          </div>
+          {marketScripts.length ? (
+            filteredMarketScripts.length ? (
+              <div className={marketView === "list" ? "script-market-list" : "script-market-grid"}>
+                {filteredMarketScripts.map((script) => (
+                  <MarketScriptCard key={script.id} script={script} actions={actions} view={marketView} />
+                ))}
+              </div>
+            ) : (
+              <div className="empty">{t("没有匹配的市场脚本。")}</div>
+            )
+          ) : (
+            <div className="empty">{market?.status === "failed" ? market.message : t("点击刷新市场加载远程脚本。")}</div>
+          )}
+        </CardContent>
+      </Panel>
+      <Panel>
+        <CardHead title={t("本地脚本")} detail={t("内置、手动和市场安装脚本；可在这里启停或删除用户脚本")} />
+        <CardContent>
+          <div className="table">
+            {scripts.length ? scripts.map((script) => <ScriptRow key={script.key} script={script} actions={actions} />) : <div className="empty">{t("未发现用户脚本。")}</div>}
+          </div>
+        </CardContent>
+      </Panel>
+    </>
   );
 }
 

@@ -3273,6 +3273,22 @@ pub async fn install_market_script(id: String) -> CommandResult<ScriptMarketPayl
 }
 
 #[tauri::command]
+pub fn import_user_script(path: String) -> CommandResult<SettingsPayload> {
+    let source = Path::new(path.trim());
+    if source.as_os_str().is_empty() {
+        return failed("脚本路径不能为空。", fallback_settings_payload());
+    }
+    let manager = default_user_script_manager();
+    match manager.import_user_script(source) {
+        Ok(_) => settings_payload("脚本已导入，重启 Codex 后生效。", "读取脚本清单失败"),
+        Err(error) => failed(
+            &format!("导入脚本失败：{error}"),
+            fallback_settings_payload(),
+        ),
+    }
+}
+
+#[tauri::command]
 pub fn set_user_script_enabled(key: String, enabled: bool) -> CommandResult<SettingsPayload> {
     let trimmed = key.trim();
     if trimmed.is_empty() {

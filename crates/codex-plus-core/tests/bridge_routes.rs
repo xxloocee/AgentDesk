@@ -729,6 +729,63 @@ async fn user_script_manager_scans_and_persists_inventory_shape() {
     );
 }
 
+#[test]
+fn user_script_manager_imports_local_javascript_without_overwriting() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("source");
+    let replacement_dir = temp.path().join("replacement");
+    let user_dir = temp.path().join("user");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::create_dir_all(&replacement_dir).unwrap();
+    let source = source_dir.join("demo.js");
+    let replacement = replacement_dir.join("demo.js");
+    std::fs::write(&source, "window.demo = 'original';").unwrap();
+    std::fs::write(&replacement, "window.demo = 'replacement';").unwrap();
+    let manager = UserScriptManager::new(
+        temp.path().join("builtin"),
+        user_dir.clone(),
+        temp.path().join("user_scripts.json"),
+    );
+
+    let imported = manager.import_user_script(&source).unwrap();
+    let overwrite_error = manager.import_user_script(&replacement).unwrap_err();
+
+    assert_eq!(imported, user_dir.join("demo.js"));
+    assert_eq!(
+        std::fs::read_to_string(user_dir.join("demo.js")).unwrap(),
+        "window.demo = 'original';"
+    );
+    assert!(overwrite_error.to_string().contains("already exists"));
+    assert_eq!(
+        manager.inventory().unwrap()["scripts"][0]["key"],
+        "user:demo.js"
+    );
+}
+
+#[test]
+fn user_script_manager_rejects_non_javascript_imports() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("notes.txt");
+    std::fs::write(&source, "not javascript").unwrap();
+    let manager = UserScriptManager::new(
+        temp.path().join("builtin"),
+        temp.path().join("user"),
+        temp.path().join("user_scripts.json"),
+    );
+
+    let extension_error = manager.import_user_script(&source).unwrap_err();
+    let directory_error = manager.import_user_script(temp.path()).unwrap_err();
+
+    assert!(extension_error.to_string().contains(".js"));
+    assert!(directory_error.to_string().contains("regular file"));
+    assert!(
+        manager.inventory().unwrap()["scripts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn user_script_inventory_merges_renderer_runtime_status() {
     let temp = tempfile::tempdir().unwrap();

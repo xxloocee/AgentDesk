@@ -334,16 +334,22 @@ describe("dream skin theme helpers", () => {
     assert.match(app, /if \(isWindowsPlatform\) \{[\s\S]*delete config\.colors;[\s\S]*delete config\.palette;/);
   });
 
-  it("keeps privateized remote asset sources dormant", async () => {
+  it("keeps privateized dream skin sources dormant while enabling the script market", async () => {
     const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    const privateization = JSON.parse(
+      await readFile(new URL("../../../scripts/privateize-agentdesk.config.json", import.meta.url), "utf8"),
+    ) as { scriptMarket?: { enabled?: boolean; repositoryUrl?: string } };
 
     assert.match(app, /useState<"market" \| "community" \| "local">\("local"\)/);
     assert.doesNotMatch(app, /\n\s*await refreshDreamSkinMarket\(true\);/);
     assert.doesNotMatch(app, /\n\s*await refreshDreamSkinCommunity\(true\);/);
-    assert.doesNotMatch(app, /\n\s*await refreshScriptMarket\(true\);/);
+    assert.match(app, /\n\s*await refreshScriptMarket\(true\);/);
     assert.doesNotMatch(app, /aria-selected=\{themeView === "community"\}/);
     assert.doesNotMatch(app, /pendingDreamSkinCommunity \? \(/);
-    assert.doesNotMatch(app, /Codex(?:Plus){2}ScriptMarket|AgentDesk-?Themes|dreamskin[.]cc/i);
+    assert.equal(privateization.scriptMarket?.enabled, true);
+    assert.ok(privateization.scriptMarket?.repositoryUrl);
+    assert.ok(app.includes(privateization.scriptMarket.repositoryUrl));
+    assert.doesNotMatch(app, /AgentDesk-?Themes|dreamskin[.]cc/i);
   });
 
   it("allows the webview to load managed theme images only", async () => {
