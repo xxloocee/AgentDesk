@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::model_suffix::lookup_model_map;
+
 const BATCH_SIZE: usize = 5;
 /// 黄金窗口：Phase 1 同步补全的最近 N 轮 user 消息。
 const GOLDEN_WINDOW_DEPTH: usize = 10;
@@ -119,13 +121,15 @@ pub enum ImageHandling {
 }
 
 /// 解析 model_vlm JSON，返回该模型的图片处理模式。
+///
+/// 未命中任何一级回退时返回 `SendAsIs`（默认行为不变，per-profile 单值配置也
+/// 不进这张 map，不受影响）。
 pub fn image_handling_mode(model: &str, model_vlm_json: &str) -> ImageHandling {
     if let Ok(map) =
         serde_json::from_str::<std::collections::BTreeMap<String, ImageHandling>>(model_vlm_json)
+        && let Some(mode) = lookup_model_map(&map, model)
     {
-        if let Some(mode) = map.get(model) {
-            return *mode;
-        }
+        return *mode;
     }
     ImageHandling::SendAsIs
 }
@@ -297,19 +301,18 @@ fn strip_all_images(messages: &mut [Value]) {
 
 /// 从 relay 配置解析模型上下文窗口上限（token 数）。
 /// 三级 fallback：model_windows JSON → context_window 全局 → 272_000 硬兜底。
+/// map 查表走与 `image_handling_mode` 同一套 key 归一化（剥后缀 + 大小写回退），
+/// 否则按模型配好的窗口会被请求体里的 `[1M]` 后缀整条错过（issue #2345）。
 fn resolve_context_window(
     model_windows_json: &str,
     context_window_str: &str,
     request_model: &str,
 ) -> u64 {
-    let model_name = request_model.rsplit('/').next().unwrap_or(request_model);
     if let Ok(map) =
-        serde_json::from_str::<std::collections::HashMap<String, String>>(model_windows_json)
+        serde_json::from_str::<std::collections::BTreeMap<String, String>>(model_windows_json)
     {
-        if let Some(token) = map.get(model_name) {
-            if let Some(w) = crate::model_suffix::parse_window_token(token) {
-                return w;
-            }
+        if let Some(w) = lookup_context_window(&map, request_model) {
+            return w;
         }
     }
     if let Ok(w) = context_window_str.parse::<u64>() {
@@ -320,10 +323,143 @@ fn resolve_context_window(
     272_000
 }
 
-/// bytes/2 粗估 token 数。主流 tokenizer 对中英文混合内容的压缩比约 1.5-2 bytes/token，
-/// 用 bytes/2 确保估计值偏向保守，避免注入描述后实际 token 数超出模型窗口。
+/// 完整名优先，短名回退，最后才把配置 key 的 provider 前缀剥掉。
+/// 多个 provider 剥头后撞名时不猜，避免把 A 供应商的窗口套到 B 供应商上。
+fn lookup_context_window(
+    map: &std::collections::BTreeMap<String, String>,
+    request_model: &str,
+) -> Option<u64> {
+    for candidate in [request_model, &provider_short_name(request_model)] {
+        if let Some(token) = lookup_model_map(map, candidate)
+            && let Some(window) = crate::model_suffix::parse_window_token(&token)
+        {
+            return Some(window);
+        }
+    }
+
+    let request_short_name = provider_short_name(request_model);
+    let normalized_matches: Vec<_> = map
+        .iter()
+        .filter(|(key, _)| provider_short_name(key).eq_ignore_ascii_case(&request_short_name))
+        .collect();
+
+    if let Some(provider) = request_model.split_once('/').map(|(provider, _)| provider) {
+        let same_provider: Vec<_> = normalized_matches
+            .iter()
+            .filter(|(key, _)| {
+                key.split_once('/')
+                    .map(|(key_provider, _)| key_provider.eq_ignore_ascii_case(provider))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if same_provider.len() == 1
+            && let Some(window) = crate::model_suffix::parse_window_token(same_provider[0].1)
+        {
+            return Some(window);
+        }
+    }
+
+    if normalized_matches.len() == 1
+        && let Some(window) = crate::model_suffix::parse_window_token(normalized_matches[0].1)
+    {
+        return Some(window);
+    }
+    None
+}
+
+fn provider_short_name(raw: &str) -> String {
+    let normalized = crate::model_suffix::normalize_model_key(raw);
+    normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+const MESSAGE_OVERHEAD_TOKENS: usize = 8;
+
+/// 只估算模型会看到的语义文本，不把 JSON key、id、图片块和转义开销整包算进去。
 fn estimate_tokens(messages: &[Value]) -> usize {
-    serde_json::to_string(messages).unwrap_or_default().len() / 2
+    let mut ascii_chars = 0usize;
+    let mut non_ascii_chars = 0usize;
+    for message in messages {
+        collect_semantic_text(message, "", &mut ascii_chars, &mut non_ascii_chars);
+    }
+    let text_tokens = ascii_chars.div_ceil(3) + non_ascii_chars;
+    text_tokens.saturating_add(messages.len().saturating_mul(MESSAGE_OVERHEAD_TOKENS))
+}
+
+fn collect_semantic_text(
+    value: &Value,
+    key: &str,
+    ascii_chars: &mut usize,
+    non_ascii_chars: &mut usize,
+) {
+    match value {
+        Value::String(text) if is_semantic_text_key(key) => {
+            for character in text.chars() {
+                if character.is_ascii() {
+                    *ascii_chars = ascii_chars.saturating_add(1);
+                } else {
+                    *non_ascii_chars = non_ascii_chars.saturating_add(1);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_semantic_text(item, key, ascii_chars, non_ascii_chars);
+            }
+        }
+        Value::Object(map) => {
+            for (child_key, child) in map {
+                collect_semantic_text(child, child_key, ascii_chars, non_ascii_chars);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_semantic_text_key(key: &str) -> bool {
+    matches!(key, "content" | "text" | "output" | "arguments" | "name")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContextTokenEstimate {
+    tokens: u64,
+    method: &'static str,
+    actual_context_used: Option<u64>,
+    estimated_new_tokens: Option<usize>,
+}
+
+fn resolve_context_token_estimate(
+    messages: &[Value],
+    request_model: &str,
+    thread_id: Option<&str>,
+) -> ContextTokenEstimate {
+    let anchor = crate::context_usage::anchor_for(thread_id, request_model);
+    if let Some(anchor) = anchor.as_ref().filter(|anchor| {
+        messages.len() >= anchor.covered_message_count
+            && messages
+                .get(anchor.boundary_message_index)
+                .is_some_and(|message| {
+                    crate::context_usage::message_matches_anchor(message, anchor)
+                })
+    }) {
+        let new_tokens = estimate_tokens(&messages[anchor.covered_message_count..]);
+        ContextTokenEstimate {
+            tokens: anchor.context_used.saturating_add(new_tokens as u64),
+            method: "actual_usage_plus_delta",
+            actual_context_used: Some(anchor.context_used),
+            estimated_new_tokens: Some(new_tokens),
+        }
+    } else {
+        ContextTokenEstimate {
+            tokens: estimate_tokens(messages) as u64,
+            method: "semantic_text_v1",
+            actual_context_used: None,
+            estimated_new_tokens: None,
+        }
+    }
 }
 
 // ── VLM API call ──────────────────────────────────────────────────────
@@ -334,6 +470,303 @@ const VLM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 #[cfg(test)]
 const VLM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// VLM 单条描述提示词：真实识图链路与「测试 VLM」共用（同源契约，spec §5.1）。
+const VLM_DESCRIBE_PROMPT: &str = "请描述图片内容。如包含文字，请精确提取图片中的文字。";
+
+/// 构造 VLM chat/completions 请求体。真实链路（call_vlm_batch）与测试入口
+/// （test_vlm_once）共用，保证测试请求与真实请求同源。
+fn build_vlm_request_body(urls: &[String], model: &str) -> Value {
+    let mut parts: Vec<Value> = urls
+        .iter()
+        .map(|u| serde_json::json!({"type": "image_url", "image_url": {"url": u}}))
+        .collect();
+    parts.push(serde_json::json!({
+        "type": "text",
+        "text": VLM_DESCRIBE_PROMPT
+    }));
+    serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": parts}],
+        "stream": false,
+    })
+}
+
+/// VLM chat/completions 端点：真实链路与「测试 VLM」共用（同源契约，spec §5.1）。
+fn vlm_endpoint(base_url: &str) -> String {
+    format!("{}/chat/completions", base_url.trim_end_matches('/'))
+}
+
+/// 原始报文展示截断上限（字符数）：防止 HTML 错误页/超大响应撑爆界面。
+const RAW_SNIPPET_LIMIT: usize = 4000;
+
+fn raw_snippet(text: &str) -> String {
+    if text.chars().count() <= RAW_SNIPPET_LIMIT {
+        text.to_string()
+    } else {
+        let head: String = text.chars().take(RAW_SNIPPET_LIMIT).collect();
+        format!("{head}\n…（已截断）")
+    }
+}
+
+/// 脱敏占位符：读者可辨识此处发生过脱敏，且无法从占位符还原原文。
+const REDACTED_PLACEHOLDER: &str = "***";
+
+/// 排障文本凭据脱敏（加固 spec §4.2）：① 已配置 Key 的精确字符串（Key 为空时
+/// 跳过——对空串做替换会毁掉整个文本）；② 授权头形态：`Authorization: <值>`
+/// 掩到行/结构分隔符、独立词 `Bearer <令牌>` 掩单个词，匹配不区分大小写。
+/// description（OCR 结果）为功能本体，不经过本函数。
+pub fn redact_secrets(text: &str, api_key: &str) -> String {
+    let out = if api_key.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(api_key, REDACTED_PLACEHOLDER)
+    };
+    mask_bearer_tokens(&mask_authorization_values(&out))
+}
+
+/// 掩码值段的词边界：空白、引号、逗号、花/尖括号。
+fn is_word_delimiter(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\t' | b'\n' | b'\r' | b',' | b'"' | b'\'' | b'}' | b'{' | b'<' | b'>'
+    )
+}
+
+/// 掩码 `Authorization: <值>`。头名后允许 JSON 引号（`"authorization":`）；
+/// 值可含空格（`Bearer sk-x` 是一个头值），掩到行/结构分隔符为止。
+fn mask_authorization_values(text: &str) -> String {
+    const WORD: &str = "authorization";
+    let lower = text.to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(text.len());
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find(WORD) {
+        let at = i + rel;
+        let mut j = at + WORD.len();
+        while j < bytes.len() && bytes[j] == b'"' {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b':' {
+            // 不是头形态（如普通文案 "authorization failed"）：原样保留
+            result.push_str(&text[i..j]);
+            i = j;
+            continue;
+        }
+        j += 1; // 冒号
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+            j += 1;
+        }
+        result.push_str(&text[i..j]);
+        // JSON 字符串值掩到闭引号；裸值可含空格（`Bearer sk-x` 是一个头值），
+        // 空白不截断，掩到行/结构分隔符为止。空值不掩（j == value_start）。
+        let value_start;
+        if j < bytes.len() && bytes[j] == b'"' {
+            result.push('"');
+            j += 1;
+            value_start = j;
+            while j < bytes.len() && bytes[j] != b'"' {
+                j += 1;
+            }
+        } else {
+            value_start = j;
+            while j < bytes.len()
+                && (matches!(bytes[j], b' ' | b'\t') || !is_word_delimiter(bytes[j]))
+            {
+                j += 1;
+            }
+        }
+        if j > value_start {
+            result.push_str(REDACTED_PLACEHOLDER);
+        }
+        i = j; // 闭引号/分隔符留给下一轮原样输出
+    }
+    result.push_str(&text[i..]);
+    result
+}
+
+/// 掩码独立词 `Bearer <令牌>`：bearer 前一字符不是字母数字/下划线、后随空白
+/// 才算命中，掩码其后的单个词。
+fn mask_bearer_tokens(text: &str) -> String {
+    const WORD: &str = "bearer";
+    let lower = text.to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(text.len());
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find(WORD) {
+        let at = i + rel;
+        let after = at + WORD.len();
+        // 前一字符是字母数字或 `_` 视为词内（如 token_bearer），不算独立词
+        let prev_in_word = at > 0
+            && ((bytes[at - 1] as char).is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        let next_is_ws = after < bytes.len() && matches!(bytes[after], b' ' | b'\t');
+        result.push_str(&text[i..after]);
+        if prev_in_word || !next_is_ws {
+            i = after;
+            continue;
+        }
+        let mut j = after;
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+            j += 1;
+        }
+        // bearer 与令牌之间的空白原样保留
+        result.push_str(&text[after..j]);
+        let value_start = j;
+        while j < bytes.len() && !is_word_delimiter(bytes[j]) {
+            j += 1;
+        }
+        if j > value_start {
+            result.push_str(REDACTED_PLACEHOLDER);
+        }
+        i = j;
+    }
+    result.push_str(&text[i..]);
+    result
+}
+
+/// 单次 VLM 测试调用的结构化结果（spec §4/§5）。
+/// raw_request/raw_response 供排障折叠区展示；raw_request 是展示副本，图片
+/// base64 截断为 64 字符前缀 + 占位符（真实请求体可含数 MB base64），构造上
+/// 不含 API Key（Key 在请求头）。raw_response/error 携带上游可控内容，构造时
+/// 经 redact_secrets 机器脱敏（加固 spec §4.5：请求侧天然不含 + 响应侧脱敏）。
+/// description（OCR 结果）为功能本体，从原始响应解析、逐字可见、不脱敏。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VlCallOutcome {
+    pub status: String,
+    pub http_code: Option<u16>,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+    pub text: Option<String>,
+    pub raw_request: Option<String>,
+    pub raw_response: Option<String>,
+}
+
+/// 「测试 VLM」输入图片上限：与前端 VLM_TEST_MAX_IMAGE_BYTES（App.tsx）同口径。
+pub const VLM_TEST_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// 校验测试入口的 image_data_url（加固 spec §4.1）。仅由 test_vlm 命令调用，
+/// 真实识图链路不经过（其 URL 来自会话消息，本就不限类型与大小——同源契约）。
+/// 口径：data:image/* + base64 段 + 解码后字节 ≤ 10MB。量解码后字节而非字符
+/// 串长度：base64 膨胀约 4/3，量字符串会把前端合法放行的图误拒。
+pub fn validate_image_data_url(url: &str) -> Result<(), String> {
+    use base64::Engine as _;
+    let Some((meta, payload)) = url.split_once(',') else {
+        return Err("image_data_url 不是合法的 data URL（缺少元数据段）".to_string());
+    };
+    if !meta.starts_with("data:image/") {
+        return Err(format!("仅支持图片文件（data:image/*），收到：{meta}"));
+    }
+    if !meta.ends_with(";base64") {
+        return Err("仅支持 base64 编码的 data URL".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|e| format!("图片 base64 解码失败：{e}"))?;
+    if bytes.len() > VLM_TEST_MAX_IMAGE_BYTES {
+        return Err(format!("图片超过 10MB 上限（解码后 {} 字节）", bytes.len()));
+    }
+    Ok(())
+}
+
+/// 「测试 VLM」单图调用：与真实识图链路共用提示词与请求体构造（spec §5.1）。
+/// 先读响应体再判 HTTP 码：非 2xx 一律 http_error，HTML 错误页不误判为
+/// json_error（spec §5.3）。status 口径：ok/http_error/timeout/send_error/
+/// json_error/no_text（client_error 由命令层产生）。
+pub async fn test_vlm_once(
+    config: &VlmConfig,
+    image_data_url: &str,
+    client: &reqwest::Client,
+) -> VlCallOutcome {
+    let _permit = vlm_semaphore()
+        .acquire()
+        .await
+        .expect("vlm semaphore closed");
+    let endpoint = vlm_endpoint(&config.base_url);
+    let body = build_vlm_request_body(&[image_data_url.to_string()], &config.model);
+    let mut display = body.clone();
+    // 展示副本：图片 base64 可达数 MB，占位替换避免拖垮 IPC/界面（与 spec §4 大小限制同因）
+    if let Some(parts) = display["messages"][0]["content"].as_array_mut() {
+        for part in parts.iter_mut() {
+            if part["type"] == "image_url" {
+                if let Some(url) = part["image_url"]["url"].as_str() {
+                    let head: String = url.chars().take(64).collect();
+                    part["image_url"]["url"] =
+                        serde_json::json!(format!("{head}…（图片 base64 已省略）"));
+                }
+            }
+        }
+    }
+    let raw_request = serde_json::to_string_pretty(&display).ok();
+    let started = std::time::Instant::now();
+    let response = match client
+        .post(&endpoint)
+        .bearer_auth(&config.api_key)
+        .json(&body)
+        .timeout(VLM_REQUEST_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let s = if e.is_timeout() {
+                "timeout"
+            } else {
+                "send_error"
+            };
+            return VlCallOutcome {
+                status: s.to_string(),
+                http_code: None,
+                duration_ms: started.elapsed().as_millis() as u64,
+                error: Some(redact_secrets(&e.to_string(), &config.api_key)),
+                text: None,
+                raw_request,
+                raw_response: None,
+            };
+        }
+    };
+    let http_code = response.status().as_u16();
+    let body_text = response.text().await.unwrap_or_default();
+    // 加固 spec §4.2：脱敏只应用于 raw_response/error 展示字段；description
+    // （OCR 结果）从原始 body 解析、逐字可见（spec §3/§5）。脱敏副本在截断前
+    // 生成——先截断会把跨界 Key 截成半截，精确替换就匹配不到了。
+    let redacted_body = redact_secrets(&body_text, &config.api_key);
+    let raw_response = Some(raw_snippet(&redacted_body));
+    let finish = |status: &str, error: Option<String>, text: Option<String>| VlCallOutcome {
+        status: status.to_string(),
+        http_code: Some(http_code),
+        duration_ms: started.elapsed().as_millis() as u64,
+        error,
+        text,
+        raw_request: raw_request.clone(),
+        raw_response: raw_response.clone(),
+    };
+    if !(200..300).contains(&http_code) {
+        let snippet: String = redacted_body.chars().take(ERROR_BODY_TRUNCATE).collect();
+        return finish(
+            "http_error",
+            Some(format!("VLM API {http_code}: {snippet}")),
+            None,
+        );
+    }
+    let response_body: Value = match serde_json::from_str(&body_text) {
+        Ok(v) => v,
+        Err(e) => {
+            let snippet: String = redacted_body.chars().take(ERROR_BODY_TRUNCATE).collect();
+            return finish(
+                "json_error",
+                Some(format!("JSON parse failed: {e} | body: {snippet}")),
+                None,
+            );
+        }
+    };
+    match response_body["choices"][0]["message"]["content"]
+        .as_str()
+        .map(String::from)
+    {
+        Some(t) => finish("ok", None, Some(t)),
+        None => finish("no_text", Some("no content".to_string()), None),
+    }
+}
+
 /// 单 batch VLM 调用（含错误详情截断）。
 async fn call_vlm_batch(urls: &[String], config: &VlmConfig) -> Result<String, String> {
     let client = crate::http_client::vlm_http_client_with_timeout(
@@ -341,20 +774,8 @@ async fn call_vlm_batch(urls: &[String], config: &VlmConfig) -> Result<String, S
         VLM_REQUEST_TIMEOUT,
     )
     .map_err(|e| format!("client: {e}"))?;
-    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
-    let mut parts: Vec<Value> = urls
-        .iter()
-        .map(|u| serde_json::json!({"type": "image_url", "image_url": {"url": u}}))
-        .collect();
-    parts.push(serde_json::json!({
-        "type": "text",
-        "text": "请描述图片内容。如包含文字，请精确提取图片中的文字。"
-    }));
-    let body = serde_json::json!({
-        "model": config.model,
-        "messages": [{"role": "user", "content": parts}],
-        "stream": false,
-    });
+    let url = vlm_endpoint(&config.base_url);
+    let body = build_vlm_request_body(urls, &config.model);
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
@@ -564,6 +985,41 @@ pub fn inject_analysis(messages: &mut [Value], result: &Result<String, String>, 
 
 // ── Main entry: strip + analyze + inject with cache ───────────────────
 
+/// 已完成的图片预处理结果；失败通过 Result 返回，调用方必须停止发送。
+#[derive(Debug, Default)]
+pub struct VlmPreprocessReport {
+    pub descriptions_injected: usize,
+}
+
+#[derive(Debug)]
+pub enum VlmPreprocessError {
+    MissingConfiguration,
+    AnalysisFailed,
+}
+
+impl std::fmt::Display for VlmPreprocessError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::MissingConfiguration => {
+                "VLM 配置不完整，无法分析本轮图片；请补充配置或显式选择剥离图片"
+            }
+            Self::AnalysisFailed => {
+                "VLM 未能分析本轮图片，已停止向主模型发送请求；请检查视觉服务后重试"
+            }
+        })
+    }
+}
+
+impl std::error::Error for VlmPreprocessError {}
+
+impl VlmPreprocessError {
+    pub(crate) fn response_body(&self) -> Value {
+        json!({"error":{"type":"vlm_preprocessing_error", "code": match self {
+            Self::MissingConfiguration => "vlm_configuration_missing",
+            Self::AnalysisFailed => "vlm_preprocessing_failed",
+        }, "message":self.to_string()}})
+    }
+}
 /// 对 messages 做图片剥离、VLM 分析、描述注入（带缓存、并发控制、上下文溢出保护）。
 ///
 /// # 参数
@@ -579,17 +1035,57 @@ pub async fn strip_image_blocks(
     context_window_str: &str,
     request_model: &str,
     responses: bool,
-) {
-    // 0. 上下文溢出保护：基于剥离图片后的纯文本预估，因为图片最终会被删掉。
+) -> Result<VlmPreprocessReport, VlmPreprocessError> {
+    strip_image_blocks_with_context(
+        messages,
+        vlm_config,
+        model_windows_json,
+        context_window_str,
+        request_model,
+        None,
+        responses,
+    )
+    .await
+}
+
+pub(crate) async fn strip_image_blocks_with_context(
+    messages: &mut [Value],
+    vlm_config: &VlmConfig,
+    model_windows_json: &str,
+    context_window_str: &str,
+    request_model: &str,
+    thread_id: Option<&str>,
+    responses: bool,
+) -> Result<VlmPreprocessReport, VlmPreprocessError> {
+    // 0. 先确认有没有图片。纯文本请求直接返回，不产生误导性的 overflow 日志。
+    let all_image_msgs = collect_recent_image_messages(messages, ANALYZE_DEPTH_LIMIT);
+    // 必须先读取上一轮锚点，再把本轮请求写成 Pending；否则会覆盖可复用的 Anchor。
+    let token_estimate = if all_image_msgs.is_empty() {
+        None
+    } else {
+        Some(resolve_context_token_estimate(
+            messages,
+            request_model,
+            thread_id,
+        ))
+    };
+    // 即使本轮没有图片，也要登记请求边界；usage 回来后下一轮仍可复用真实 token。
+    crate::context_usage::remember_request_boundary(thread_id, request_model, messages);
+    if all_image_msgs.is_empty() {
+        // 最近窗口没有图片不代表整段历史都没有：长对话里图片消息会被挤出
+        // 50 条分析窗口，漏发到纯文本上游（glm-5.3 等）会直接 400 且无法重试恢复。
+        // 这里必须沿用旧逻辑的全量兜底清理，只跳过 VLM 分析与描述注入。
+        strip_all_images(messages);
+        return Ok(VlmPreprocessReport::default());
+    }
+
+    // 1. 上下文溢出保护：优先使用上游真实 usage，只估算锚点之后的新增消息。
     let context_window =
         resolve_context_window(model_windows_json, context_window_str, request_model);
     // 留 10% 安全余量给上游 tokenizer 差异。
     let effective_window = (context_window as f64 * CONTEXT_SAFETY_MARGIN) as u64;
-    let current_tokens = {
-        let mut stripped = messages.to_vec();
-        strip_all_images(&mut stripped);
-        estimate_tokens(&stripped)
-    };
+    let token_estimate = token_estimate.expect("image request must have a token estimate");
+    let current_tokens = token_estimate.tokens;
     let available = effective_window.saturating_sub(current_tokens as u64);
     // 1 token 安全余量，防止零宽窗口。
     if available <= 1 {
@@ -611,26 +1107,25 @@ pub async fn strip_image_blocks(
                 );
             }
         }
-        let _ = crate::diagnostic_log::append_diagnostic_log(
-            "vlm_context_overflow",
-            json!({
+        let mut detail = json!({
                 "context_window": context_window,
-                "text_only_estimated_tokens": current_tokens,
+                "effective_threshold": effective_window,
+                "estimated_tokens": current_tokens,
+                "estimate_method": token_estimate.method,
                 "skipped_images": image_count,
-            }),
-        );
-        return;
+        });
+        if let Some(actual) = token_estimate.actual_context_used {
+            detail["actual_context_used"] = json!(actual);
+        }
+        if let Some(new_tokens) = token_estimate.estimated_new_tokens {
+            detail["estimated_new_tokens"] = json!(new_tokens);
+        }
+        let _ = crate::diagnostic_log::append_diagnostic_log("vlm_context_overflow", detail);
+        return Ok(VlmPreprocessReport::default());
     }
 
-    // 1. 计算注入预算 X = available / AVG_DESC_BUDGET。
+    // 2. 计算注入预算 X = available / AVG_DESC_BUDGET。
     let x_budget = (available / AVG_DESC_BUDGET) as usize;
-
-    // 2. 收集 50 轮对话中的带图消息（最新优先）。
-    let all_image_msgs = collect_recent_image_messages(messages, ANALYZE_DEPTH_LIMIT);
-    if all_image_msgs.is_empty() {
-        strip_all_images(messages);
-        return;
-    }
 
     // 3. 确定黄金窗口边界（最近 GOLDEN_WINDOW_DEPTH 条 user/tool 消息中最早一条的 index）。
     let golden_user_cutoff = {
@@ -726,6 +1221,11 @@ pub async fn strip_image_blocks(
                 round_urls.push(url.clone());
             }
         }
+        if !round_urls.is_empty() && (vlm_config.api_key.trim().is_empty()
+            || vlm_config.model.trim().is_empty() || vlm_config.base_url.trim().is_empty())
+        {
+            return Err(VlmPreprocessError::MissingConfiguration);
+        }
         if analyze_and_inject(&round_urls, vlm_config, &mut descriptions, *msg_idx)
             .await
             .is_err()
@@ -738,7 +1238,7 @@ pub async fn strip_image_blocks(
                     "is_current": true,
                 }),
             );
-            return;
+            return Err(VlmPreprocessError::AnalysisFailed);
         }
     }
 
@@ -924,6 +1424,7 @@ pub async fn strip_image_blocks(
             );
         });
     }
+    Ok(VlmPreprocessReport { descriptions_injected: descriptions.len() })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -974,6 +1475,173 @@ mod tests {
     #[test]
     fn handling_mode_defaults_to_send_as_is_for_empty_string() {
         assert_eq!(image_handling_mode("gpt-4", ""), ImageHandling::SendAsIs);
+    }
+
+    // ── image_handling_mode：key 归一化与三级回退（issue #2345）─────
+
+    #[test]
+    fn handling_mode_matches_suffixless_key_when_request_has_window_suffix() {
+        // 前端落盘的 key 是剥掉后缀的 slug，而上游请求体里的 model 可能带 `[1M]`。
+        assert_eq!(
+            image_handling_mode("deepseek-v4-pro[1M]", r#"{"deepseek-v4-pro":"vlm"}"#),
+            ImageHandling::Vlm
+        );
+        assert_eq!(
+            image_handling_mode("deepseek-v4-pro[256K]", r#"{"deepseek-v4-pro":"strip"}"#),
+            ImageHandling::Strip
+        );
+    }
+
+    #[test]
+    fn handling_mode_matches_request_without_suffix_against_legacy_suffixed_key() {
+        // 历史数据：旧版本把行名原样（带后缀）写成 map key，不能因为剥后缀就丢掉。
+        assert_eq!(
+            image_handling_mode("deepseek-v4-pro", r#"{"deepseek-v4-pro[1M]":"vlm"}"#),
+            ImageHandling::Vlm
+        );
+        // 两侧都带后缀时也应命中。
+        assert_eq!(
+            image_handling_mode("deepseek-v4-pro[1M]", r#"{"deepseek-v4-pro[1M]":"vlm"}"#),
+            ImageHandling::Vlm
+        );
+    }
+
+    #[test]
+    fn handling_mode_matches_ignoring_case() {
+        // 供应商 slug 大小写不统一（GLM-5.3 vs glm-5.3），上游对大小写宽容。
+        assert_eq!(
+            image_handling_mode("GLM-5.3", r#"{"glm-5.3":"vlm"}"#),
+            ImageHandling::Vlm
+        );
+        assert_eq!(
+            image_handling_mode("glm-5.3", r#"{"GLM-5.3":"vlm"}"#),
+            ImageHandling::Vlm
+        );
+        // 带后缀 + 大小写差异同时存在时，两级回退要串起来。
+        assert_eq!(
+            image_handling_mode("GLM-5.3[1M]", r#"{"glm-5.3":"vlm"}"#),
+            ImageHandling::Vlm
+        );
+    }
+
+    #[test]
+    fn handling_mode_keeps_exact_match_priority_over_case_insensitive() {
+        // 精确命中优先于大小写回退：两个 key 同时存在时不得被回退分支抢走。
+        let map = r#"{"GLM-5.3":"strip","glm-5.3":"vlm"}"#;
+        assert_eq!(image_handling_mode("GLM-5.3", map), ImageHandling::Strip);
+        assert_eq!(image_handling_mode("glm-5.3", map), ImageHandling::Vlm);
+    }
+
+    #[test]
+    fn handling_mode_does_not_strip_invalid_suffix() {
+        // 括号内不是合法窗口 token 时整串保留（与前端 MODEL_SUFFIX_PATTERN 同口径），
+        // 因此 `gpt-4[abc]` 不该命中 `gpt-4`。
+        assert_eq!(
+            image_handling_mode("gpt-4[abc]", r#"{"gpt-4":"vlm"}"#),
+            ImageHandling::SendAsIs
+        );
+        assert_eq!(
+            image_handling_mode("gpt-4[0]", r#"{"gpt-4":"vlm"}"#),
+            ImageHandling::SendAsIs
+        );
+        // 但这类字面量 key 本身仍可被逐字命中。
+        assert_eq!(
+            image_handling_mode("gpt-4[abc]", r#"{"gpt-4[abc]":"vlm"}"#),
+            ImageHandling::Vlm
+        );
+    }
+
+    #[test]
+    fn handling_mode_defaults_when_neither_slug_nor_case_matches() {
+        assert_eq!(
+            image_handling_mode("deepseek-v4-pro[1M]", r#"{"gpt-4":"vlm"}"#),
+            ImageHandling::SendAsIs
+        );
+    }
+
+    #[test]
+    fn resolve_context_window_matches_suffixed_request_model() {
+        // 与 image_handling_mode 同一套 key 归一化：带后缀的请求也要读到按模型配的窗口。
+        assert_eq!(
+            resolve_context_window(
+                r#"{"deepseek-v4-pro":"256000"}"#,
+                "200000",
+                "deepseek-v4-pro[1M]"
+            ),
+            256_000
+        );
+        // 大小写回退。
+        assert_eq!(
+            resolve_context_window(r#"{"glm-5.3":"128000"}"#, "200000", "GLM-5.3"),
+            128_000
+        );
+        // 历史带后缀 key。
+        assert_eq!(
+            resolve_context_window(
+                r#"{"deepseek-v4-pro[1M]":"256000"}"#,
+                "200000",
+                "deepseek-v4-pro"
+            ),
+            256_000
+        );
+        // modelWindows 里的 key 也可能带 provider 前缀；不能只剥请求模型的前缀。
+        assert_eq!(
+            resolve_context_window(
+                r#"{"z-ai/glm-5.3":"1M"}"#,
+                "",
+                "z-ai/glm-5.3"
+            ),
+            1_000_000
+        );
+        // 反向兼容：map 用短名、请求模型带前缀时也要能命中。
+        assert_eq!(
+            resolve_context_window(r#"{"glm-5.3":"1M"}"#, "", "z-ai/glm-5.3"),
+            1_000_000
+        );
+        // 双边归一化：请求短名、配置完整名也能命中。
+        assert_eq!(
+            resolve_context_window(r#"{"z-ai/glm-5.3":"1M"}"#, "", "glm-5.3"),
+            1_000_000
+        );
+        // 多个 provider 剥头后撞名时不能随机选一个。
+        assert_eq!(
+            resolve_context_window(
+                r#"{"z-ai/glm-5.3":"1M","other/glm-5.3":"256k"}"#,
+                "200000",
+                "glm-5.3"
+            ),
+            200_000
+        );
+    }
+
+    #[test]
+    fn resolve_context_window_still_falls_back_when_model_absent() {
+        assert_eq!(
+            resolve_context_window(r#"{"gpt-4":"100000"}"#, "200000", "other[1M]"),
+            200_000
+        );
+    }
+
+    // ── build_vlm_request_body（测试 VLM 同源契约）─────────────────
+
+    #[test]
+    fn build_vlm_request_body_shape_and_prompt() {
+        let body =
+            build_vlm_request_body(&["data:image/png;base64,QUJD".to_string()], "qwen-vl-max");
+        assert_eq!(body["model"], "qwen-vl-max");
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["messages"][0]["role"], "user");
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content.as_array().map(Vec::len), Some(2));
+        assert_eq!(content[0]["type"], "image_url");
+        assert_eq!(content[0]["image_url"]["url"], "data:image/png;base64,QUJD");
+        assert_eq!(content[1]["type"], "text");
+        // 提示词必须与真实链路 call_vlm_batch 所用完全一致（同源，spec §5.1）
+        assert_eq!(
+            content[1]["text"],
+            "请描述图片内容。如包含文字，请精确提取图片中的文字。"
+        );
     }
 
     // ── strip_images_only ─────────────────────────────────────────
@@ -1223,6 +1891,40 @@ mod tests {
         assert!(l > s, "larger input should produce larger estimate");
     }
 
+    #[test]
+    fn estimate_tokens_ignores_transport_only_fields_and_images() {
+        let text_only = vec![serde_json::json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "hello world"}]
+        })];
+        let with_transport_noise = vec![serde_json::json!({
+            "role": "user",
+            "tool_call_id": "call-12345678901234567890",
+            "content": [
+                {"type": "text", "text": "hello world"},
+                {"type": "image_url", "image_url": {"url": "[image omitted]"}}
+            ]
+        })];
+
+        assert_eq!(estimate_tokens(&text_only), estimate_tokens(&with_transport_noise));
+    }
+
+    #[test]
+    fn estimate_tokens_counts_cjk_more_conservatively_than_ascii() {
+        let ascii = vec![serde_json::json!({
+            "role": "user",
+            "content": "abcdefghij"
+        })];
+        let cjk = vec![serde_json::json!({
+            "role": "user",
+            "content": "一二三四五六七八九十"
+        })];
+
+        // 10 个 ASCII 约 4 token；10 个中文字符按 10 token 估算。
+        assert_eq!(estimate_tokens(&ascii), 4 + MESSAGE_OVERHEAD_TOKENS);
+        assert_eq!(estimate_tokens(&cjk), 10 + MESSAGE_OVERHEAD_TOKENS);
+    }
+
     // ── is_retryable ──────────────────────────────────────────────
 
     #[test]
@@ -1350,7 +2052,7 @@ mod tests {
             base_url: String::new(),
         };
 
-        strip_image_blocks(&mut messages, &vlm_config, "{}", "272000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &vlm_config, "{}", "272000", "gpt-4", false).await.unwrap();
 
         // 图片已被删除
         let parts = messages[0]["content"].as_array().unwrap();
@@ -1392,7 +2094,7 @@ mod tests {
             "gpt-4",
             false,
         )
-        .await;
+        .await.unwrap();
 
         // 图片已被剥离（防止图片叠加纯文本导致溢出更严重）
         let parts = messages[0]["content"].as_array().unwrap();
@@ -1417,6 +2119,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strip_image_blocks_uses_actual_usage_plus_delta() {
+        let thread_id = "vlm-actual-usage-plus-delta-test";
+        let model = "fixture-vlm-model";
+        let base_message = serde_json::json!({
+            "role": "user",
+            "content": "a".repeat(3000)
+        });
+        let base_messages = vec![base_message.clone()];
+        crate::context_usage::remember_request_boundary(Some(thread_id), model, &base_messages);
+        crate::context_usage::record_usage(
+            Some(thread_id),
+            model,
+            &serde_json::json!({"total_tokens": 800}),
+        );
+
+        cache_insert(
+            url_hash("https://actual-usage.example.com/current.png"),
+            "actual usage cached description".to_string(),
+        );
+        let mut messages = vec![
+            base_message,
+            serde_json::json!({"role": "assistant", "content": "ok"}),
+            serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "current"},
+                    {"type": "image_url", "image_url": {"url": "https://actual-usage.example.com/current.png"}}
+                ]
+            }),
+        ];
+        let vlm_config = VlmConfig {
+            api_key: String::new(),
+            model: String::new(),
+            base_url: String::new(),
+        };
+
+        strip_image_blocks_with_context(
+            &mut messages,
+            &vlm_config,
+            "{}",
+            "1000",
+            model,
+            Some(thread_id),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let current_text = messages[2]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            current_text.contains("actual usage cached description"),
+            "cached description should be injected when actual usage plus delta fits"
+        );
+    }
+
+    #[tokio::test]
     async fn strip_image_blocks_no_images_in_messages() {
         let mut messages = vec![serde_json::json!({
             "role": "user",
@@ -1429,12 +2193,67 @@ mod tests {
             base_url: String::new(),
         };
 
-        strip_image_blocks(&mut messages, &vlm_config, "{}", "272000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &vlm_config, "{}", "272000", "gpt-4", false).await.unwrap();
 
         // 消息应保持不变
         let parts = messages[0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0]["text"], "just text");
+    }
+
+    #[tokio::test]
+    async fn strip_image_blocks_still_strips_images_outside_recent_window() {
+        // 回归（issue：glm-5.3 纯文本上游对 image_url 直接 400）：
+        // 图片消息滑出最近 50 条 user/tool 分析窗口后，不允许原样发给上游。
+        let mut messages = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "old screenshot"},
+                {"type": "image_url", "image_url": {"url": "https://out-of-window.example.com/old.png"}},
+            ]
+        })];
+        for i in 0..(ANALYZE_DEPTH_LIMIT + 5) {
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": format!("round {i}")}]
+            }));
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": format!("reply {i}")
+            }));
+        }
+
+        let vlm_config = VlmConfig {
+            api_key: String::new(),
+            model: String::new(),
+            base_url: String::new(),
+        };
+        strip_image_blocks_with_context(
+            &mut messages,
+            &vlm_config,
+            "{}",
+            "1000000",
+            "fixture-out-of-window-model",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let has_image = messages.iter().any(|message| {
+            message
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .any(|part| part.get("type").and_then(Value::as_str) == Some("image_url"))
+                })
+        });
+        assert!(
+            !has_image,
+            "images outside the recent window must still be stripped"
+        );
     }
 
     #[tokio::test]
@@ -1456,7 +2275,7 @@ mod tests {
             base_url: "https://127.0.0.1:1".to_string(), // 故意不可达
         };
 
-        strip_image_blocks(&mut messages, &vlm_config, "{}", "272000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &vlm_config, "{}", "272000", "gpt-4", false).await.unwrap_err();
 
         // fail-closed：图片保留
         let parts = messages[0]["content"].as_array().unwrap();
@@ -1509,7 +2328,7 @@ mod tests {
             base_url: "https://127.0.0.1:1".to_string(), // VLM 不可达，触发 fail-closed 路径
         };
 
-        strip_image_blocks(&mut messages, &vlm_config, "{}", "900000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &vlm_config, "{}", "900000", "gpt-4", false).await.unwrap_err();
 
         // VLM 不可达 → analyze_all 返回 Err → strip_image_blocks early return
         // → fail-closed：全部图片保留，不注入任何描述。
@@ -1568,7 +2387,7 @@ mod tests {
             base_url: String::new(),
         };
 
-        strip_image_blocks(&mut messages, &vlm_config, "{}", "900000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &vlm_config, "{}", "900000", "gpt-4", false).await.unwrap();
 
         // 所有图片已删除
         for msg in &messages {
@@ -1678,7 +2497,7 @@ mod tests {
             base_url: String::new(),
         };
 
-        strip_image_blocks(&mut messages, &vlm_config, "{}", "800", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &vlm_config, "{}", "800", "gpt-4", false).await.unwrap();
 
         // 所有图片已删除
         for msg in &messages {
@@ -1847,7 +2666,7 @@ mod tests {
             ]
         })];
 
-        strip_image_blocks(&mut messages, &config, "{}", "272000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &config, "{}", "272000", "gpt-4", false).await.unwrap();
 
         let parts = messages[0]["content"].as_array().unwrap();
         let has_image = parts
@@ -1891,7 +2710,7 @@ mod tests {
             ]
         })];
 
-        strip_image_blocks(&mut messages, &config, "{}", "272000", "gpt-4", true).await;
+        strip_image_blocks(&mut messages, &config, "{}", "272000", "gpt-4", true).await.unwrap();
 
         let parts = messages[0]["content"].as_array().unwrap();
 
@@ -1957,7 +2776,7 @@ mod tests {
             }),
         ];
 
-        strip_image_blocks(&mut messages, &config, "{}", "272000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &config, "{}", "272000", "gpt-4", false).await.unwrap();
 
         let parts = messages[1]["content"].as_array().unwrap();
         assert!(
@@ -2055,7 +2874,7 @@ mod tests {
             ]
         })];
 
-        strip_image_blocks(&mut messages, &config, "{}", "272000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &config, "{}", "272000", "gpt-4", false).await.unwrap();
 
         let parts = messages[0]["content"].as_array().unwrap();
         let has_image = parts.iter().any(|p| {
@@ -2150,7 +2969,7 @@ mod tests {
             }),
         ];
 
-        strip_image_blocks(&mut messages, &config, "{}", "900000", "gpt-4", false).await;
+        strip_image_blocks(&mut messages, &config, "{}", "900000", "gpt-4", false).await.unwrap();
 
         // 两轮图片均应被剥离
         for (i, label) in ["historical", "current"].iter().enumerate() {
@@ -2175,6 +2994,395 @@ mod tests {
                 "{label} round: VLM description not injected: {text}"
             );
         }
+    }
+
+    // ── redact_secrets（加固 spec §4.2 脱敏）─────────────────────────
+
+    #[test]
+    fn redact_secrets_replaces_exact_key_everywhere() {
+        assert_eq!(
+            redact_secrets("Incorrect API key provided: sk-test-123", "sk-test-123"),
+            "Incorrect API key provided: ***"
+        );
+        assert_eq!(redact_secrets("sk-a and sk-a", "sk-a"), "*** and ***");
+    }
+
+    #[test]
+    fn redact_secrets_skips_exact_replacement_when_key_empty() {
+        // 空串不做精确替换（会把整段文本毁掉），但授权头形态规则照常生效
+        assert_eq!(redact_secrets("bearer abc123", ""), "bearer ***");
+        assert_eq!(redact_secrets("plain text", ""), "plain text");
+    }
+
+    #[test]
+    fn redact_secrets_masks_authorization_header_forms() {
+        let cases = [
+            ("Authorization: Bearer sk-abc", "Authorization: ***"),
+            ("authorization: Basic dXNlcjpwYXNz", "authorization: ***"),
+            ("\"Authorization\": \"Bearer xyz\"", "\"Authorization\": \"***\""),
+            // 空值不掩成占位符
+            ("\"Authorization\": \"\"", "\"Authorization\": \"\""),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_secrets(input, "unused-key"), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn redact_secrets_masks_standalone_bearer_words() {
+        assert_eq!(
+            redact_secrets("header was bearer tok123, then more", "unused"),
+            "header was bearer ***, then more"
+        );
+        // 非独立词 / 后面不是空白：不误伤
+        assert_eq!(redact_secrets("unbearer something", "unused"), "unbearer something");
+        assert_eq!(redact_secrets("bearerxyz", "unused"), "bearerxyz");
+        // 下划线词内（token_bearer）不算独立词
+        assert_eq!(redact_secrets("token_bearer abc", "unused"), "token_bearer abc");
+    }
+
+    #[test]
+    fn redact_secrets_keeps_normal_text_intact() {
+        assert_eq!(redact_secrets("HTTP 401 未授权", "sk-test"), "HTTP 401 未授权");
+        // authorization 作为普通单词（无冒号）不触发
+        assert_eq!(redact_secrets("authorization failed", "sk-test"), "authorization failed");
+    }
+
+    // ── validate_image_data_url（加固 spec §4.1 第二道门）────────────
+
+    #[test]
+    fn validate_image_data_url_accepts_normal_image() {
+        assert!(validate_image_data_url("data:image/png;base64,QUJD").is_ok());
+        assert!(validate_image_data_url("data:image/jpeg;base64,/9j/4AAQ").is_ok());
+    }
+
+    #[test]
+    fn validate_image_data_url_rejects_non_image_and_non_data() {
+        assert!(validate_image_data_url("https://example.com/cat.png").is_err());
+        assert!(validate_image_data_url("data:text/html;base64,PGh0bWw+").is_err());
+        // 非 base64 编码段（正常前端 FileReader 产物恒为 base64）
+        assert!(validate_image_data_url("data:image/png,QUJD").is_err());
+        assert!(validate_image_data_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn validate_image_data_url_enforces_size_limit_on_decoded_bytes() {
+        use base64::Engine as _;
+        let encode = |n: usize| {
+            let payload = base64::engine::general_purpose::STANDARD.encode(vec![b'A'; n]);
+            format!("data:image/png;base64,{payload}")
+        };
+        // 恰好 10MB 放行（与前端 > 判断口径一致）；量的是解码后字节而非字符串长度
+        assert!(validate_image_data_url(&encode(VLM_TEST_MAX_IMAGE_BYTES)).is_ok());
+        assert!(validate_image_data_url(&encode(VLM_TEST_MAX_IMAGE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn validate_image_data_url_rejects_broken_base64() {
+        assert!(validate_image_data_url("data:image/png;base64,!!!not-base64!!!").is_err());
+    }
+
+    // ── test_vlm_once（测试 VLM 命令核心）─────────────────────────
+
+    fn test_vlm_config(base_url: String) -> VlmConfig {
+        VlmConfig {
+            api_key: "sk-test".to_string(),
+            model: "vlm-mock".to_string(),
+            base_url,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vlm_once_ok_returns_description_and_same_source_body() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "mock: a cat on a sofa"}}],
+                // 模拟上游在成功响应里夹带回显凭据（加固 spec §5 边界情况）
+                "echo": "sk-test"
+            })))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "ok");
+        assert_eq!(outcome.http_code, Some(200));
+        assert_eq!(outcome.text.as_deref(), Some("mock: a cat on a sofa"));
+        assert!(outcome.error.is_none());
+        // 同源：测试请求体就是共享原语的产物（含真实链路同款提示词与图片块）
+        let raw = outcome.raw_request.as_deref().unwrap();
+        assert!(raw.contains("请描述图片内容"));
+        assert!(raw.contains("data:image/png;base64,QUJD"));
+        assert!(raw.contains("vlm-mock"));
+        // 展示副本：图片 base64 截断为前缀 + 占位符，真实 body 照常发送
+        assert!(raw.contains("图片 base64 已省略"));
+        // spec §5.4：raw_request 不得泄露 API Key
+        assert!(!raw.contains("sk-test"));
+        assert!(outcome.raw_response.as_deref().unwrap().contains("a cat"));
+        // 加固 spec §4.2：raw_response 对已配置 Key 机器脱敏（响应侧回显场景）
+        let raw_resp = outcome.raw_response.as_deref().unwrap();
+        assert!(!raw_resp.contains("sk-test"));
+        assert!(raw_resp.contains("***"));
+    }
+
+    #[tokio::test]
+    async fn test_vlm_once_redacts_upstream_echoed_credentials() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(
+                "{\"error\":{\"message\":\"Incorrect API key provided: sk-test\",\"authorization\":\"Bearer sk-test\"}}",
+            ))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "http_error");
+        for field in [
+            outcome.error.as_deref().unwrap_or(""),
+            outcome.raw_response.as_deref().unwrap_or(""),
+        ] {
+            assert!(!field.contains("sk-test"), "leaked in: {field}");
+            assert!(field.contains("***"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vlm_once_keeps_description_verbatim_while_redacting_raw_and_error() {
+        // 加固 spec §3/§5：图里印着已配置 Key 且成功——description（OCR 结果）
+        // 逐字可见；脱敏只应用于 raw_response/error，不吞 description。
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "the image prints the key sk-test on a red badge",
+                        // 模拟上游把 Key 回显在 content 之外的结构化字段
+                        "reflected_key": "sk-test",
+                    }
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "ok");
+        // description 逐字可见：命中精确匹配的那串不被掩
+        let desc = outcome.text.as_deref().unwrap();
+        assert!(desc.contains("sk-test"), "description must stay verbatim: {desc}");
+        assert!(!desc.contains("***"), "description must stay verbatim: {desc}");
+        // raw_response 仍整段脱敏
+        let raw_resp = outcome.raw_response.as_deref().unwrap();
+        assert!(!raw_resp.contains("sk-test"));
+        assert!(raw_resp.contains("***"));
+    }
+
+    #[tokio::test]
+    async fn test_vlm_once_http_error_401() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("{\"error\":\"bad key\"}"))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "http_error");
+        assert_eq!(outcome.http_code, Some(401));
+        assert!(outcome.error.as_deref().unwrap().contains("401"));
+        assert!(outcome.text.is_none());
+        assert!(outcome.raw_response.as_deref().unwrap().contains("bad key"));
+    }
+
+    #[tokio::test]
+    async fn test_vlm_once_http_error_404() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("{\"error\":\"not found\"}"))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "http_error");
+        assert_eq!(outcome.http_code, Some(404));
+        assert!(outcome.error.as_deref().unwrap().contains("404"));
+    }
+
+    #[tokio::test]
+    async fn test_vlm_once_http_error_429() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(429).set_body_string("{\"error\":\"rate limited\"}"),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "http_error");
+        assert_eq!(outcome.http_code, Some(429));
+        assert!(outcome.error.as_deref().unwrap().contains("429"));
+    }
+
+    /// spec §5.3：非 2xx 的 HTML 错误页必须报 http_error，不得误判为 json_error。
+    #[tokio::test]
+    async fn test_vlm_once_html_error_page_reports_http_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(502)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html><body>Bad Gateway</body></html>"),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "http_error");
+        assert_eq!(outcome.http_code, Some(502));
+        assert!(outcome.raw_response.as_deref().unwrap().contains("<html>"));
+    }
+
+    #[tokio::test]
+    async fn test_vlm_once_json_error_on_200_non_json() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("plain text not json"))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "json_error");
+        assert_eq!(outcome.http_code, Some(200));
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("JSON parse failed")
+        );
+        assert!(
+            outcome
+                .raw_response
+                .as_deref()
+                .unwrap()
+                .contains("plain text not json")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vlm_once_no_text_when_content_missing() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {}}]
+            })))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "no_text");
+        assert_eq!(outcome.http_code, Some(200));
+        assert!(outcome.error.as_deref().unwrap().contains("no content"));
+    }
+
+    /// cfg(test) 下 VLM_REQUEST_TIMEOUT=2s，mock 延迟 3s 触发超时路径。
+    #[tokio::test]
+    async fn test_vlm_once_timeout() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3)))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let outcome = test_vlm_once(
+            &test_vlm_config(mock_server.uri()),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        assert_eq!(outcome.status, "timeout");
+        assert!(outcome.http_code.is_none());
+    }
+
+    /// 对端在建立 TCP 连接后立刻关闭，稳定覆盖传输层 send_error 分支。
+    /// 这里不能直接请求未监听端口：macOS 可能把它报成 timeout，HTTP 代理也可能
+    /// 返回自己的错误页并把结果变成 http_error，二者都不再是在测客户端传输失败。
+    #[tokio::test]
+    async fn test_vlm_once_send_error_when_peer_closes_connection() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        // 接受一次连接后立刻丢弃 TCP 流，模拟已建立连接的对端异常关闭。
+        let close_peer = tokio::spawn(async move {
+            let _ = listener.accept().await.unwrap();
+        });
+        // 测试必须绕过开发机/CI 的代理设置，否则 loopback 请求可能被代理接管。
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let outcome = test_vlm_once(
+            &test_vlm_config(format!("http://{address}")),
+            "data:image/png;base64,QUJD",
+            &client,
+        )
+        .await;
+        close_peer.await.unwrap();
+        assert_eq!(outcome.status, "send_error");
+        assert!(outcome.http_code.is_none());
+        assert!(outcome.raw_request.is_some());
     }
 
     // ── Responses 协议下的 tool 输出（issue #1996 的第二处缺口）──────

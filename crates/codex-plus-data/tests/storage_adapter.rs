@@ -498,6 +498,159 @@ fn delete_codex_thread_sqlite_dir_layout_removes_session_index_entry_and_undo_re
 /// 三种 schema 里原先只有 delete_codex_thread 清了索引，这条覆盖 generic
 /// sessions 那条路径。
 #[test]
+fn delete_codex_thread_clears_sidebar_global_state_and_catalog_cache() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    let sqlite_dir = home.join("sqlite");
+    let rollout = home.join("sessions/rollout-t1.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    fs::create_dir_all(&sqlite_dir).unwrap();
+    fs::write(&rollout, "{}\n").unwrap();
+    let state_db = home.join("state_5.sqlite");
+    create_codex_thread_db(&state_db, &rollout);
+    let keep_id = "keep";
+    fs::write(
+        home.join(".codex-global-state.json"),
+        json!({
+            "projectless-thread-ids": ["local:t1", "t1", keep_id],
+            "thread-projectless-output-directories": {"t1": "C:/out", "keep": "C:/keep"},
+            "thread-workspace-root-hints": {"local:t1": "C:/workspace", "keep": "C:/keep"},
+            "thread-writable-roots": {"t1": ["C:/work"], "keep": ["C:/keep"]},
+            "electron-persisted-atom-state": {
+                "thread-client-id-v1:t1": "client",
+                "thread-reference-capability:local%3At1": "capability",
+                "thread-client-id-v1:keep": "keep-client",
+                "sidebar-width": 296
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        home.join("session_index.jsonl"),
+        "{\"id\":\"t1\"}\n{\"id\":\"keep\"}\n",
+    )
+    .unwrap();
+    let catalog_db = Connection::open(sqlite_dir.join("codex-dev.db")).unwrap();
+    catalog_db
+        .execute(
+            "CREATE TABLE local_thread_catalog (thread_id TEXT PRIMARY KEY)",
+            [],
+        )
+        .unwrap();
+    catalog_db
+        .execute("CREATE TABLE thread_timeline_ledger (thread_id TEXT)", [])
+        .unwrap();
+    catalog_db
+        .execute(
+            "CREATE TABLE local_thread_catalog_scan_entries (thread_id TEXT)",
+            [],
+        )
+        .unwrap();
+    catalog_db
+        .execute(
+            "INSERT INTO local_thread_catalog VALUES ('t1'), ('keep')",
+            [],
+        )
+        .unwrap();
+    catalog_db
+        .execute(
+            "INSERT INTO thread_timeline_ledger VALUES ('t1'), ('keep')",
+            [],
+        )
+        .unwrap();
+    catalog_db
+        .execute(
+            "INSERT INTO local_thread_catalog_scan_entries VALUES ('t1'), ('keep')",
+            [],
+        )
+        .unwrap();
+    drop(catalog_db);
+
+    let deleted =
+        SQLiteStorageAdapter::new(&state_db, BackupStore::new(tmp.path().join("backups")))
+            .with_codex_home(&home)
+            .delete_local(&session("local:t1", "Codex Thread"));
+    assert_eq!(deleted.status, DeleteStatus::LocalDeleted);
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".codex-global-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["projectless-thread-ids"], json!([keep_id]));
+    assert!(
+        state["thread-projectless-output-directories"]
+            .get("t1")
+            .is_none()
+    );
+    assert!(
+        state["thread-workspace-root-hints"]
+            .get("local:t1")
+            .is_none()
+    );
+    assert!(state["thread-writable-roots"].get("t1").is_none());
+    assert!(
+        state["electron-persisted-atom-state"]
+            .get("thread-client-id-v1:t1")
+            .is_none()
+    );
+    assert!(
+        state["electron-persisted-atom-state"]
+            .get("thread-client-id-v1:keep")
+            .is_some()
+    );
+    let catalog_db = Connection::open(sqlite_dir.join("codex-dev.db")).unwrap();
+    for table in [
+        "local_thread_catalog",
+        "thread_timeline_ledger",
+        "local_thread_catalog_scan_entries",
+    ] {
+        let count: i64 = catalog_db
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE thread_id = 't1'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+
+    let restored =
+        SQLiteStorageAdapter::new(&state_db, BackupStore::new(tmp.path().join("backups")))
+            .with_codex_home(&home)
+            .undo(deleted.undo_token.as_deref().unwrap());
+    assert_eq!(restored.status, DeleteStatus::Undone);
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".codex-global-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        state["projectless-thread-ids"],
+        json!([keep_id, "local:t1", "t1"])
+    );
+    assert_eq!(
+        state["thread-projectless-output-directories"]["t1"],
+        "C:/out"
+    );
+    assert_eq!(
+        state["electron-persisted-atom-state"]["thread-client-id-v1:t1"],
+        "client"
+    );
+    let catalog_db = Connection::open(sqlite_dir.join("codex-dev.db")).unwrap();
+    for table in [
+        "local_thread_catalog",
+        "thread_timeline_ledger",
+        "local_thread_catalog_scan_entries",
+    ] {
+        let count: i64 = catalog_db
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE thread_id = 't1'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "{table}");
+    }
+}
+
+#[test]
 fn delete_local_clears_the_session_index_for_generic_sessions() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("codex-home");
@@ -618,7 +771,12 @@ fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
     );
 
     assert_eq!(result.status, DeleteStatus::LocalDeleted);
-    assert_eq!(result.message, "已从 2 个本地存储删除");
+    assert!(result.message.starts_with("已从 2 个本地存储删除；备份："));
+    let tokens: Vec<String> = serde_json::from_str(result.undo_token.as_deref().unwrap()).unwrap();
+    assert_eq!(tokens.len(), 2);
+    for token in tokens {
+        assert!(result.message.contains(&format!("{token}.json")));
+    }
     assert_eq!(thread_count(&first_db, "t1"), 0);
     assert_eq!(thread_count(&second_db, "t1"), 0);
     assert!(!first_rollout.exists());
@@ -656,7 +814,12 @@ fn delete_local_from_paths_undo_restores_duplicate_threads_and_shared_rollout_to
     let token = deleted.undo_token.as_deref().unwrap();
 
     assert_eq!(deleted.status, DeleteStatus::LocalDeleted);
-    assert_eq!(deleted.message, "已从 2 个本地存储删除");
+    assert!(deleted.message.starts_with("已从 2 个本地存储删除；备份："));
+    let tokens: Vec<String> = serde_json::from_str(token).unwrap();
+    assert_eq!(tokens.len(), 2);
+    for token in tokens {
+        assert!(deleted.message.contains(&format!("{token}.json")));
+    }
     assert_eq!(thread_count(&old_db, "t1"), 0);
     assert_eq!(thread_count(&new_db, "t1"), 0);
     assert!(!rollout.exists());
@@ -1149,4 +1312,187 @@ fn thread_usage_history_reads_rollout_token_count_events() {
             ]
         })
     );
+}
+
+#[test]
+fn thread_usage_live_reads_only_the_tail_of_the_rollout() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    let mut lines = String::new();
+    // 前面垫足够多的无关大行，把早期 token 事件挤出尾部窗口：状态栏只关心最新几条。
+    for index in 0..4000 {
+        lines.push_str(&format!(
+            "{{\"timestamp\":\"2026-06-02T04:00:00Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"text\":\"{}\"}}}}\n",
+            "x".repeat(200 + index % 7)
+        ));
+    }
+    lines.push_str(concat!(
+        "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":5000,\"cached_input_tokens\":1500,\"output_tokens\":500,\"total_tokens\":5500},\"last_token_usage\":{\"input_tokens\":1200,\"cached_input_tokens\":900,\"output_tokens\":120,\"reasoning_output_tokens\":40,\"total_tokens\":1320},\"model_context_window\":258400}}}\n",
+        "{\"timestamp\":\"2026-06-02T05:00:10Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":7000,\"cached_input_tokens\":2500,\"output_tokens\":750,\"total_tokens\":7750},\"last_token_usage\":{\"input_tokens\":2000,\"cached_input_tokens\":1200,\"output_tokens\":250,\"reasoning_output_tokens\":60,\"total_tokens\":2250},\"model_context_window\":258400}}}\n"
+    ));
+    fs::write(&rollout_path, lines).unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    let value = adapter.codex_thread_usage_live(&session("local:t1", "Codex Thread"));
+    assert_eq!(value["status"], json!("ok"));
+    assert_eq!(value["session_id"], json!("t1"));
+    assert_eq!(
+        value["rollout_path"],
+        json!(rollout_path.to_string_lossy().to_string())
+    );
+    assert_eq!(
+        value["events"],
+        json!([
+            {
+                "t": "2026-06-02T05:00:00Z",
+                "input_tokens": 1200,
+                "cached_input_tokens": 900,
+                "output_tokens": 120,
+                "reasoning_output_tokens": 40,
+                "total_tokens": 1320,
+                "context_window": 258400,
+                "turn_output_tokens": 500
+            },
+            {
+                "t": "2026-06-02T05:00:10Z",
+                "input_tokens": 2000,
+                "cached_input_tokens": 1200,
+                "output_tokens": 250,
+                "reasoning_output_tokens": 60,
+                "total_tokens": 2250,
+                "context_window": 258400,
+                "turn_output_tokens": 750
+            }
+        ])
+    );
+}
+
+fn live_usage_token_event(
+    output_tokens: i64,
+    input_tokens: i64,
+    cached_input_tokens: i64,
+) -> serde_json::Value {
+    json!({
+        "timestamp": "2026-10-20T05:00:00Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": { "output_tokens": output_tokens },
+                "last_token_usage": {
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "output_tokens": 100,
+                    "total_tokens": input_tokens + 100
+                },
+                "model_context_window": 100000
+            }
+        }
+    })
+}
+
+fn live_usage_from_records(records: &[serde_json::Value]) -> serde_json::Value {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    let lines = records
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect::<String>();
+    fs::write(&rollout_path, lines).unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+    let value = adapter.codex_thread_usage_live(&session("local:t1", "Codex Thread"));
+    assert_eq!(value["status"], "ok");
+    value
+}
+
+#[test]
+fn thread_usage_live_marks_real_turns_with_monotonic_session_totals() {
+    let value = live_usage_from_records(&[
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}),
+        live_usage_token_event(100, 1000, 1000),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}),
+        json!({"type":"turn_context","payload":{"turn_id":"turn-2"}}),
+        live_usage_token_event(200, 100, 0),
+        // 同一轮重新写上下文，不能因此拆散本轮的多次调用。
+        json!({"type":"turn_context","payload":{"turn_id":"turn-2"}}),
+        live_usage_token_event(300, 900, 810),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}),
+    ]);
+    let events = value["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["turn_id"], "turn-1");
+    assert_eq!(events[1]["turn_id"], "turn-2");
+    assert_eq!(events[2]["turn_id"], "turn-2");
+    assert_eq!(events[0]["turn_output_tokens"], 100);
+    assert_eq!(events[1]["turn_output_tokens"], 200);
+    assert_eq!(events[2]["turn_output_tokens"], 300);
+    assert_eq!(events[1]["cached_input_tokens"], 0);
+    assert_eq!(events[2]["cached_input_tokens"], 810);
+}
+
+#[test]
+fn thread_usage_live_recovers_turn_from_completion_when_start_is_outside_tail() {
+    let value = live_usage_from_records(&[
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}),
+        json!({"type":"response_item","payload":{"type":"function_call_output","output":"x".repeat(600_000)}}),
+        live_usage_token_event(100, 100, 0),
+        live_usage_token_event(200, 900, 810),
+        json!({"type":"event_msg","payload":{"type":"turn_complete","turn_id":"turn-1"}}),
+        json!({"type":"event_msg","payload":{"type":"turn_started","turn_id":"turn-2"}}),
+        // 旧版上下文没有 id，仍要保留 task_started/turn_started 确定的本轮 id。
+        json!({"type":"turn_context","payload":{}}),
+        live_usage_token_event(300, 1000, 0),
+    ]);
+    let events = value["events"].as_array().unwrap();
+    assert_eq!(events[0]["turn_id"], "turn-1");
+    assert_eq!(events[1]["turn_id"], "turn-1");
+    assert_eq!(events[2]["turn_id"], "turn-2");
+}
+
+#[test]
+fn thread_usage_live_expands_tail_to_find_an_active_turn_boundary() {
+    let value = live_usage_from_records(&[
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}),
+        // 两条 token 记录已在初始窗口内，也要继续向前找被大工具输出挤出的轮边界。
+        json!({"type":"response_item","payload":{"type":"function_call_output","output":"x".repeat(600_000)}}),
+        live_usage_token_event(100, 100, 0),
+        live_usage_token_event(200, 900, 810),
+    ]);
+    let events = value["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["turn_id"], "turn-1");
+    assert_eq!(events[1]["turn_id"], "turn-1");
+}
+
+#[test]
+fn thread_usage_live_does_not_inherit_a_previous_turn_id_when_new_start_has_none() {
+    let value = live_usage_from_records(&[
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}),
+        live_usage_token_event(100, 1000, 1000),
+        json!({"type":"event_msg","payload":{"type":"task_started"}}),
+        live_usage_token_event(200, 1000, 0),
+    ]);
+    let events = value["events"].as_array().unwrap();
+    assert_eq!(events[0]["turn_id"], "turn-1");
+    assert!(events[1].get("turn_id").is_none());
+}
+
+#[test]
+fn thread_usage_live_reports_missing_sessions_without_history_payload() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    fs::write(&rollout_path, "").unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    let value = adapter.codex_thread_usage_live(&session("local:missing", "Missing"));
+    assert_eq!(value["status"], json!("failed"));
+    assert_eq!(value["session_id"], json!("missing"));
+    assert_eq!(value["events"], json!([]));
+    assert!(value.get("history").is_none());
 }

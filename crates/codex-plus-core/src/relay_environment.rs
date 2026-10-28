@@ -145,10 +145,11 @@ fn yaml_top_level_bool(contents: &str, key: &str) -> Option<bool> {
     })
 }
 
+/// NO_PROXY 只是「不走代理」的排除列表，本身不会让流量走代理，不算需要清理的代理变量（#2691）。
 fn is_proxy_environment_name(name: &str) -> bool {
     matches!(
         name.trim().to_ascii_uppercase().as_str(),
-        "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "NO_PROXY" | "FTP_PROXY"
+        "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "FTP_PROXY"
     )
 }
 
@@ -174,9 +175,23 @@ where
         .collect()
 }
 
+fn proxy_variables_from_os_pairs<I>(
+    pairs: I,
+    source: ProxyEnvironmentSource,
+) -> Vec<ProxyEnvironmentVariable>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    let pairs = pairs.into_iter().filter_map(|(name, value)| {
+        let name = name.into_string().ok()?;
+        Some((name, value.to_string_lossy().into_owned()))
+    });
+    proxy_variables_from_pairs(pairs, source)
+}
+
 fn detect_proxy_environment_variables() -> Vec<ProxyEnvironmentVariable> {
     let mut variables =
-        proxy_variables_from_pairs(std::env::vars(), ProxyEnvironmentSource::Process);
+        proxy_variables_from_os_pairs(std::env::vars_os(), ProxyEnvironmentSource::Process);
     variables.extend(detect_user_proxy_environment_variables());
     variables.sort_by(|left, right| {
         left.name
@@ -256,7 +271,7 @@ mod tests {
                 .iter()
                 .map(|item| item.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["HTTPS_PROXY", "NO_PROXY"]
+            vec!["HTTPS_PROXY"]
         );
     }
 

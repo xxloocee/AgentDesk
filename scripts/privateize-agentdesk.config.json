@@ -30,13 +30,13 @@
     "indexUrl": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/index.json"
   },
   "dreamSkinSources": {
-    "enabled": false,
-    "marketIndexUrl": "https://themes.agentdesk.invalid/index.json",
-    "marketRawBaseUrl": "https://themes.agentdesk.invalid/",
-    "marketRepositoryUrl": "",
-    "communityApiOrigin": "https://community.agentdesk.invalid",
-    "communityGalleryUrl": "",
-    "communityStudioUrl": ""
+    "enabled": true,
+    "marketIndexUrl": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlus-Themes/main/index.json",
+    "marketRawBaseUrl": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlus-Themes/main/",
+    "marketRepositoryUrl": "https://github.com/BigPizzaV3/CodexPlusPlus-Themes",
+    "communityApiOrigin": "https://api.dreamskin.cc",
+    "communityGalleryUrl": "https://dreamskin.cc/gallery",
+    "communityStudioUrl": "https://dreamskin.cc/studio"
   },
   "sessionShare": {
     "enabled": false,

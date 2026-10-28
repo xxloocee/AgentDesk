@@ -157,6 +157,63 @@ pub struct SanitizeModelSuffixResult {
     pub updated: usize,
 }
 
+fn connection_has_table(db: &Connection, table: &str) -> bool {
+    db.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+        [table],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+fn connection_has_column(db: &Connection, table: &str, column: &str) -> bool {
+    db.query_row(
+        &format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1 LIMIT 1"),
+        [column],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// 读出「未归档目标模式任务」对应 thread 的持久化模型（取 updated_at 最新一条）。
+/// 用于重启后把 config.toml 的默认 model 对齐到长线目标任务实际使用的模型，
+/// 防止恢复任务静默回落到 model_list 第一条（issue #2264）。
+/// 任何 schema 不匹配 / 库不可读都返回 None，由调用端回落旧行为。
+pub fn latest_unarchived_goal_thread_model(home: &Path) -> Option<String> {
+    for db_path in codex_session_db_paths_from_home(home) {
+        if !db_path.exists() {
+            continue;
+        }
+        let Ok(db) = Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) else {
+            continue;
+        };
+        if !connection_has_table(&db, "automation_runs") || !connection_has_table(&db, "threads") {
+            continue;
+        }
+        if !connection_has_column(&db, "threads", "model") {
+            continue;
+        }
+        let Ok(model) = db.query_row(
+            "SELECT t.model FROM automation_runs a \
+             JOIN threads t ON t.id = a.thread_id \
+             WHERE COALESCE(a.archived_reason, '') = '' AND COALESCE(t.model, '') != '' \
+             ORDER BY a.updated_at DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        ) else {
+            continue;
+        };
+        let model = model.trim();
+        if !model.is_empty() {
+            return Some(model.to_string());
+        }
+    }
+    None
+}
+
 /// 扫描 codex session 数据库中的 threads 表，把 model 字段里带合法后缀的
 /// 记录改写为剥离后缀的 slug，使 codex 模型选择器不再显示带后缀的历史项。
 pub fn sanitize_thread_model_suffixes(home: &Path) -> anyhow::Result<SanitizeModelSuffixResult> {
@@ -170,6 +227,123 @@ pub fn sanitize_thread_model_suffixes(home: &Path) -> anyhow::Result<SanitizeMod
         result.updated += updated;
     }
     Ok(result)
+}
+
+/// 把仍然停留在「上一次默认模型」的会话回填为新选中的默认模型（issue #2081）。
+///
+/// Codex 桌面端把每个会话的模型固化在 `threads.model`，`config.toml` 顶层的
+/// `model` 只影响新会话，所以切换供应商/模型后旧对话仍用创建时的旧模型。
+///
+/// 判据刻意收窄：只改**仍等于 `previous_model`** 的行。用户手动改过模型的会话
+/// 不会命中，因而不会被回填覆盖。
+///
+/// 调用方负责确认 Codex 已退出（sqlite 无 WAL 写锁），并在切换成功后调用；
+/// 这里不做进程探测，避免把锁等待拖进启动链路。
+pub fn backfill_thread_models_to_default(
+    home: &Path,
+    previous_model: &str,
+    new_model: &str,
+) -> anyhow::Result<usize> {
+    let previous_model = previous_model.trim();
+    let new_model = new_model.trim();
+    if previous_model.is_empty() || new_model.is_empty() || previous_model == new_model {
+        return Ok(0);
+    }
+    let mut updated = 0;
+    for db_path in codex_session_db_paths_from_home(home) {
+        if !db_path.exists() {
+            continue;
+        }
+        updated += backfill_thread_models_in_db(&db_path, previous_model, new_model)?;
+    }
+    Ok(updated)
+}
+
+/// 待迁移记录放在 codex home 下，与受管 catalog 同级；只由 Codex++ 读写。
+const PENDING_THREAD_MODEL_MIGRATION_FILE: &str = "codex-plus-pending-thread-model-migration.json";
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct PendingThreadModelMigration {
+    /// 依次经历过的旧默认模型；连续切换 A→B→C 时 A、B 两类会话都迁到 C。
+    from: Vec<String>,
+    to: String,
+}
+
+fn pending_thread_model_migration_path(home: &Path) -> PathBuf {
+    home.join(PENDING_THREAD_MODEL_MIGRATION_FILE)
+}
+
+/// 切换供应商/默认模型成功后调用：只记录「旧默认 → 新默认」，不碰 sqlite。
+///
+/// 切换时 Codex 可能仍在运行并持有 WAL 写锁，直接回填有锁冲突和覆盖用户手选的
+/// 风险（#2081 维护者结论），所以拆成延迟迁移：真正的写入留给下一次启动前
+/// [`apply_pending_thread_model_migration`]。
+pub fn record_pending_thread_model_migration(
+    home: &Path,
+    previous_model: &str,
+    new_model: &str,
+) -> anyhow::Result<()> {
+    let previous_model = previous_model.trim();
+    let new_model = new_model.trim();
+    if previous_model.is_empty() || new_model.is_empty() || previous_model == new_model {
+        return Ok(());
+    }
+    let path = pending_thread_model_migration_path(home);
+    let mut pending = fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PendingThreadModelMigration>(&bytes).ok())
+        .unwrap_or_default();
+    if !pending.from.iter().any(|model| model == previous_model) {
+        pending.from.push(previous_model.to_string());
+    }
+    // 切回曾经的默认模型时，它不再是「旧默认」。
+    pending.from.retain(|model| model != new_model);
+    pending.to = new_model.to_string();
+    if pending.from.is_empty() {
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    crate::settings::atomic_write(&path, &serde_json::to_vec_pretty(&pending)?)?;
+    Ok(())
+}
+
+/// 启动 Codex 之前消费待迁移记录。`enabled` 为 false 时只丢弃记录，
+/// 避免用户之后打开开关时把很早以前的切换翻出来执行。返回回填的会话数。
+pub fn apply_pending_thread_model_migration(home: &Path, enabled: bool) -> anyhow::Result<usize> {
+    let path = pending_thread_model_migration_path(home);
+    let Ok(bytes) = fs::read(&path) else {
+        return Ok(0);
+    };
+    let pending = serde_json::from_slice::<PendingThreadModelMigration>(&bytes);
+    let mut updated = 0;
+    if let (true, Ok(pending)) = (enabled, &pending) {
+        for previous_model in &pending.from {
+            updated += backfill_thread_models_to_default(home, previous_model, &pending.to)?;
+        }
+    }
+    // 回填失败时上面已经返回，记录保留到下次重试；成功或关闭时清掉。
+    let _ = fs::remove_file(&path);
+    Ok(updated)
+}
+
+fn backfill_thread_models_in_db(
+    db_path: &Path,
+    previous_model: &str,
+    new_model: &str,
+) -> anyhow::Result<usize> {
+    let mut conn = Connection::open(db_path)?;
+    // schema 不匹配时安静跳过，与 sanitize_thread_model_suffixes_in_db 一致。
+    if !connection_has_table(&conn, "threads") || !connection_has_column(&conn, "threads", "model")
+    {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    let updated = tx.execute(
+        "UPDATE threads SET model = ?1 WHERE model = ?2",
+        [new_model, previous_model],
+    )?;
+    tx.commit()?;
+    Ok(updated)
 }
 
 /// 同时清理 threads.model 与 logs_2.sqlite 中残留的带后缀模型名。
@@ -231,9 +405,19 @@ fn sanitize_thread_model_suffixes_in_db(db_path: &Path) -> anyhow::Result<(usize
     Ok((scanned, updated))
 }
 
+/// 日志清理每批处理的行数。feedback_log_body 是完整请求/响应文本，命中行总量
+/// 可达 GB 级，一次性 collect 会把整表读进内存（issue #2244 的冷启动卡顿）。
+const LOG_SANITIZE_BATCH_SIZE: i64 = 500;
+
 /// 清理 logs_2.sqlite 中 feedback_log_body 字段里包含模型后缀的日志。
 /// 这些日志只是历史记录，不会直接影响模型选择器，但清理后可避免
 /// 诊断/遥测中继续出现已废弃的带后缀模型名。
+///
+/// issue #2244：原实现对 logs 表跑无短路的全表 content 扫描
+/// （`SELECT rowid, feedback_log_body FROM logs WHERE feedback_log_body LIKE '%[%'`），
+/// 每次启动都要把命中行整段读进内存，且没有任何「上次已清理」的记忆。
+/// 现在先做一次 COUNT 预检（干净机器上通常是 0，直接返回、连事务都不开），
+/// 命中时再按 rowid 分批读、逐批写。
 fn sanitize_logs_model_suffixes(home: &Path) -> anyhow::Result<()> {
     let db_path = codex_logs_db_path_from_home(home);
     if !db_path.exists() {
@@ -260,26 +444,54 @@ fn sanitize_logs_model_suffixes(home: &Path) -> anyhow::Result<()> {
     if !has_body {
         return Ok(());
     }
-    // 用保守模式匹配：包含 '[' 且以 ']%' 或包含 '[1M]' 等常见后缀。
-    // 这里只替换明确符合 parse_model_suffix 规则的模型名，避免误改无关日志文本。
-    let mut stmt = conn
-        .prepare("SELECT rowid, feedback_log_body FROM logs WHERE feedback_log_body LIKE '%[%'")?;
-    let rows: Vec<(i64, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(Result::ok)
-        .collect();
-    drop(stmt);
-
-    let tx = conn.transaction()?;
-    let mut update = tx.prepare("UPDATE logs SET feedback_log_body = ?1 WHERE rowid = ?2")?;
-    for (rowid, body) in rows {
-        let sanitized = sanitize_model_suffixes_in_text(&body);
-        if sanitized != body {
-            update.execute([&sanitized, &rowid.to_string()])?;
-        }
+    // 短路预检：likes 命中为 0 时不做任何读取，这是绝大多数机器的常态。
+    let candidates: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM logs WHERE feedback_log_body LIKE '%[%'",
+        [],
+        |row| row.get(0),
+    )?;
+    if candidates == 0 {
+        return Ok(());
     }
-    drop(update);
-    tx.commit()?;
+
+    let mut cursor = i64::MIN;
+    loop {
+        // 分批：每轮只把这一批的 rowid 与 body 读进内存，避免整表驻留。
+        let mut stmt = conn.prepare(
+            "SELECT rowid, feedback_log_body FROM logs \
+             WHERE rowid > ?1 AND feedback_log_body LIKE '%[%' \
+             ORDER BY rowid LIMIT ?2",
+        )?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map(rusqlite::params![cursor, LOG_SANITIZE_BATCH_SIZE], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+        if rows.is_empty() {
+            break;
+        }
+        let last_rowid = rows[rows.len() - 1].0;
+        // 用保守模式匹配：包含 '[' 且以 ']%' 或包含 '[1M]' 等常见后缀。
+        // 这里只替换明确符合 parse_model_suffix 规则的模型名，避免误改无关日志文本。
+        let tx = conn.transaction()?;
+        let mut update = tx.prepare("UPDATE logs SET feedback_log_body = ?1 WHERE rowid = ?2")?;
+        for (rowid, body) in rows {
+            let sanitized = sanitize_model_suffixes_in_text(&body);
+            if sanitized != body {
+                update.execute([&sanitized, &rowid.to_string()])?;
+            }
+        }
+        drop(update);
+        tx.commit()?;
+
+        if last_rowid <= cursor {
+            // 防御性终止：rowid 没前进说明查询语义与预期不符，继续会死循环。
+            break;
+        }
+        cursor = last_rowid;
+    }
     Ok(())
 }
 

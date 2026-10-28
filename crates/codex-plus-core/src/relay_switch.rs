@@ -4,15 +4,52 @@ use std::path::Path;
 use anyhow::Context;
 
 use crate::relay_config::{
-    backfill_relay_profile_from_home_with_common, relay_config_status_from_home,
+    LiveEndpointChanged, RelayBackfillPolicy, backfill_relay_profile_from_home_with_common,
+    backfill_relay_profile_from_home_with_common_and_policy, relay_config_status_from_home,
 };
 use crate::settings::{BackendSettings, RelayMode, SettingsStore};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RelaySwitchResult {
     pub settings: BackendSettings,
     pub configured: bool,
     pub backup_path: Option<String>,
+}
+
+/// 切换前回填上一个供应商时，实时配置的 endpoint 已被外部改过（#2666）。
+/// 管理器据此弹窗让用户选择，`message` 保持原来的完整报错文案。
+#[derive(Debug)]
+pub struct LiveEndpointConflict {
+    pub profile_id: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for LiveEndpointConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LiveEndpointConflict {}
+
+/// 遇到 [`LiveEndpointConflict`] 时用户的选择。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LiveConflictResolution {
+    /// 默认：照旧停下，不动任何文件。
+    #[default]
+    Stop,
+    /// 把实时 config.toml / auth.json 采纳为一个新供应商，再继续切换。
+    ImportAsNewProfile,
+    /// 先备份实时配置，上一个供应商保留原快照，再继续切换。
+    DiscardLiveChanges,
+}
+
+/// 冲突处理的附带结果，供管理器拼提示。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiveConflictOutcome {
+    pub imported_profile_id: Option<String>,
+    pub live_backup_path: Option<String>,
 }
 
 pub fn switch_relay_profile_in_home(
@@ -21,35 +58,89 @@ pub fn switch_relay_profile_in_home(
     next_settings: BackendSettings,
     previous_active_relay_id: &str,
 ) -> anyhow::Result<RelaySwitchResult> {
+    switch_relay_profile_in_home_resolving_conflict(
+        store,
+        home,
+        next_settings,
+        previous_active_relay_id,
+        LiveConflictResolution::Stop,
+    )
+    .map(|(result, _)| result)
+}
+
+pub fn switch_relay_profile_in_home_resolving_conflict(
+    store: &SettingsStore,
+    home: &Path,
+    next_settings: BackendSettings,
+    previous_active_relay_id: &str,
+    resolution: LiveConflictResolution,
+) -> anyhow::Result<(RelaySwitchResult, LiveConflictOutcome)> {
     let mut selected_settings = next_settings;
     if !selected_settings.relay_profiles_enabled {
         anyhow::bail!("供应商配置总开关已关闭，未写入 config.toml / auth.json。");
     }
-    crate::codex_app_state::capture_app_state_snapshot_nonfatal(home, "relay_switch.before");
-
-    let original_settings = store.load().unwrap_or_default();
+    // 读不到当前设置时不要用默认值继续：回滚分支会把「仅剩默认供应商」写回磁盘，
+    // 这正是供应商列表被清空的成因。读失败直接中止切换，保住原文件。
+    let saved_settings = store
+        .load()
+        .context("读取当前供应商设置失败，已中止切换以免覆盖用户配置")?;
+    let original_settings_bytes = store
+        .snapshot_raw_bytes()
+        .context("读取当前供应商原始快照失败，已中止切换")?;
     let live_snapshot = LiveFilesSnapshot::capture(home).context("读取当前 Codex 实时配置失败")?;
+    // 先补回被过滤掉的供应商，再做上一个供应商的回填：回填按 id 在列表里找
+    // 「当前供应商」，子集请求里同样可能缺它（否则会误报「已不在配置列表中」）。
+    restore_missing_saved_profiles(&mut selected_settings, &saved_settings);
+    let mut outcome = LiveConflictOutcome::default();
     if !previous_active_relay_id.trim().is_empty()
         && previous_active_relay_id != selected_settings.active_relay_id
     {
-        backfill_profile_before_switch(home, &mut selected_settings, previous_active_relay_id)?;
+        match resolution {
+            LiveConflictResolution::Stop => {
+                backfill_profile_before_switch(home, &mut selected_settings, previous_active_relay_id)?;
+            }
+            LiveConflictResolution::ImportAsNewProfile => {
+                outcome.imported_profile_id = Some(import_live_as_new_profile(
+                    home,
+                    &mut selected_settings,
+                    previous_active_relay_id,
+                )?);
+            }
+            LiveConflictResolution::DiscardLiveChanges => {
+                // 不回填：上一个供应商保留原快照，实时改动只留在备份里。
+                outcome.live_backup_path = crate::relay_config::backup_live_files(home)
+                    .context("备份实时配置失败，已停止切换")?;
+            }
+        }
     }
+    crate::codex_app_state::capture_app_state_snapshot_nonfatal(home, "relay_switch.before");
 
-    store
-        .save(&selected_settings)
+    let committed_revision = store
+        .save_versioned(&selected_settings)
         .context("保存供应商设置失败")?;
     let selected_settings = store.load().context("读取供应商设置失败")?;
 
     match apply_selected_relay_profile(home, &selected_settings) {
         Ok(result) => {
+            let result = (result, outcome);
             crate::codex_app_state::sync_app_state_after_provider_switch_nonfatal(
                 home,
+                "relay_switch.after",
+            );
+            // 换供应商/聚合后，Codex 模型选择器里可能还留着上一个目录的模型 ID
+            // （例如别的管理器写下的 `ccs-xxx/model`），按新目录清一遍。
+            crate::codex_app_state::prune_stale_model_references_after_switch_nonfatal(
+                home,
+                &selected_settings,
                 "relay_switch.after",
             );
             Ok(result)
         }
         Err(error) => {
-            let settings_restore_error = store.save(&original_settings).err();
+            // 内部回滚恢复已验证原始字节，保留unknown字段并避免2→default1保护误拦。
+            let settings_restore_error = store
+                .restore_raw_snapshot(original_settings_bytes.as_deref(), &committed_revision)
+                .err();
             let live_restore_error = live_snapshot.restore(home).err();
             if settings_restore_error.is_some() || live_restore_error.is_some() {
                 anyhow::bail!(
@@ -64,6 +155,45 @@ pub fn switch_relay_profile_in_home(
             }
             Err(error)
         }
+    }
+}
+
+/// 切换请求必须携带完整 settings。供应商列表页曾按分页过滤后直接把子集提交给切换
+/// （前端缺陷）：模型聚合会因成员不在请求里直接失败（聚合成员供应商不存在），
+/// 一旦成功保存，其它分页的供应商还会从 settings.json 里消失。
+/// 这里按 id 把磁盘上已有、请求里缺失的供应商与聚合配置补回；请求里的同 id 版本优先，
+/// 只兜底缺失项，保证任何调用方都不会把用户配置越切越少。
+fn restore_missing_saved_profiles(selected: &mut BackendSettings, saved: &BackendSettings) {
+    let mut restored_ids: Vec<String> = Vec::new();
+    for profile in &saved.relay_profiles {
+        if !selected
+            .relay_profiles
+            .iter()
+            .any(|item| item.id == profile.id)
+        {
+            selected.relay_profiles.push(profile.clone());
+            restored_ids.push(profile.id.clone());
+        }
+    }
+    for aggregate in &saved.aggregate_relay_profiles {
+        if !selected
+            .aggregate_relay_profiles
+            .iter()
+            .any(|item| item.id == aggregate.id)
+        {
+            selected.aggregate_relay_profiles.push(aggregate.clone());
+            restored_ids.push(format!("aggregate:{}", aggregate.id));
+        }
+    }
+    if !restored_ids.is_empty() {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "relay_switch.restored_missing_profiles",
+            serde_json::json!({
+                "restoredIds": restored_ids,
+                "selectedProfileCount": selected.relay_profiles.len(),
+                "savedProfileCount": saved.relay_profiles.len(),
+            }),
+        );
     }
 }
 
@@ -115,17 +245,81 @@ fn backfill_profile_before_switch(
     settings: &mut BackendSettings,
     previous_active_relay_id: &str,
 ) -> anyhow::Result<()> {
+    // 确认属于另一个已保存供应商的 live 配置，不回填到旧 profile（共享 Key 也适用）。
+    if crate::relay_config::live_config_matches_other_profile_in_home(
+        home,
+        settings,
+        previous_active_relay_id,
+    )? {
+        return Ok(());
+    }
+    // 找不到上一个供应商是用户能自助处理的一类原因（它已被删除或 id 变了），
+    // 单独给一条能直接照做的话；下面回填失败则属于另一类，见那里的写法。
     let profile = settings
         .relay_profiles
         .iter_mut()
         .find(|profile| profile.id == previous_active_relay_id)
-        .with_context(|| "当前供应商已不在配置列表中，已停止切换以避免覆盖用户改动。")?;
+        .with_context(|| {
+            format!(
+                "当前供应商（{previous_active_relay_id}）已不在配置列表中，已停止切换以避免覆盖用户改动。"
+            )
+        })?;
+    // issue #1888：管理器把本函数返回的错误拼成「回填当前供应商配置失败：{error}」，
+    // 而 `{error}` 只打印最外层 context，底层原因（读 home 失败等）会被丢掉，
+    // 用户看到的就是一句没有信息量的报错。这里把 context 链完整拼进消息里。
     backfill_relay_profile_from_home_with_common(
         home,
         profile,
         &mut settings.relay_context_config_contents,
     )
-    .with_context(|| "回填当前供应商配置失败")
+    .with_context(|| format!("回填当前供应商配置失败（供应商：{previous_active_relay_id}）"))
+    .map_err(|error| {
+        let message = format!("{error:#}");
+        // endpoint 被外部改过是用户能选择怎么处理的一类（#2666），保留类型交给管理器弹窗。
+        if error.chain().any(|cause| cause.is::<LiveEndpointChanged>()) {
+            anyhow::Error::new(LiveEndpointConflict {
+                profile_id: previous_active_relay_id.to_string(),
+                message,
+            })
+        } else {
+            anyhow::anyhow!(message)
+        }
+    })
+}
+
+/// 把实时 config.toml / auth.json 采纳成一个新供应商（复制上一个供应商的其余设置），
+/// 上一个供应商保留原快照不动。返回新供应商的 id。
+fn import_live_as_new_profile(
+    home: &Path,
+    settings: &mut BackendSettings,
+    previous_active_relay_id: &str,
+) -> anyhow::Result<String> {
+    let source = settings
+        .relay_profiles
+        .iter()
+        .find(|profile| profile.id == previous_active_relay_id)
+        .cloned()
+        .with_context(|| {
+            format!("当前供应商（{previous_active_relay_id}）已不在配置列表中，无法导入实时配置。")
+        })?;
+    let mut imported = source.clone();
+    imported.id = format!("relay-{}", uuid::Uuid::new_v4());
+    let base_name = if source.name.trim().is_empty() {
+        source.id.as_str()
+    } else {
+        source.name.trim()
+    };
+    imported.name = format!("{base_name}（实时配置）");
+    backfill_relay_profile_from_home_with_common_and_policy(
+        home,
+        &mut imported,
+        &mut settings.relay_context_config_contents,
+        RelayBackfillPolicy::AdoptLiveIdentity,
+    )
+    .context("把实时配置导入为新供应商失败，已停止切换")?;
+    let id = imported.id.clone();
+    settings.relay_profiles.push(imported);
+    Ok(id)
 }
 
 fn apply_selected_relay_profile(
@@ -135,15 +329,11 @@ fn apply_selected_relay_profile(
     let relay = settings.active_relay_profile();
     let common_config = relay_combined_common_config(settings);
     let result = if relay.relay_mode == RelayMode::Official && !relay.official_mix_api_key {
-        let auth_contents =
-            (!relay.auth_contents.trim().is_empty()).then_some(relay.auth_contents.as_str());
-        crate::relay_config::clear_relay_config_to_home_with_auth(home, auth_contents)?
+        crate::relay_config::apply_relay_profile_with_preservation(home, &relay, &common_config, crate::protocol_proxy::protocol_proxy_port(), settings.relay_preserve_nonprovider_settings)?
     } else {
         validate_switch_profile_files(&relay)?;
-        crate::relay_config::apply_relay_profile_to_home_with_switch_rules(
-            home,
-            &relay,
-            &common_config,
+        crate::relay_config::apply_relay_profile_with_preservation(
+            home, &relay, &common_config, crate::protocol_proxy::protocol_proxy_port(), settings.relay_preserve_nonprovider_settings,
         )?
     };
     let status = relay_config_status_from_home(home);

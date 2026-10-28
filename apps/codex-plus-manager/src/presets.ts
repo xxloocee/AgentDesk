@@ -174,16 +174,6 @@ export const PRESETS: ProviderPreset[] = [
 
   // ── 聚合/中转 ──
   {
-    id: "ergouzi",
-    name: "Ergouzi 二狗子",
-    websiteUrl: "https://ergouzi.life",
-    apiKeyUrl: "https://ergouzi.life",
-    category: "aggregator",
-    baseUrl: "https://ergouzi.life/v1",
-    protocol: "responses",
-    model: "gpt-5.5",
-  },
-  {
     id: "runapi",
     name: "RunAPI",
     websiteUrl: "https://runapi.host",
@@ -234,24 +224,6 @@ export const PRESETS: ProviderPreset[] = [
     websiteUrl: "https://apikey.fun",
   },
   {
-    id: "pateway",
-    name: "PatewayAI",
-    category: "aggregator",
-    baseUrl: "https://api.pateway.ai/v1",
-    protocol: "responses",
-    model: "gpt-5.5",
-    websiteUrl: "https://pateway.ai",
-  },
-  {
-    id: "therouter",
-    name: "TheRouter",
-    category: "aggregator",
-    baseUrl: "https://api.therouter.ai/v1",
-    protocol: "chatCompletions",
-    model: "openai/gpt-5.3-codex",
-    websiteUrl: "https://therouter.ai",
-  },
-  {
     id: "novita",
     name: "Novita AI",
     category: "aggregator",
@@ -260,24 +232,6 @@ export const PRESETS: ProviderPreset[] = [
     model: "zai-org/glm-5.1",
     modelList: ["zai-org/glm-5.1"],
     websiteUrl: "https://novita.ai",
-  },
-  {
-    id: "shengsuanyun",
-    name: "Shengsuanyun",
-    category: "aggregator",
-    baseUrl: "https://router.shengsuanyun.com/api/v1",
-    protocol: "chatCompletions",
-    model: "openai/gpt-5.5",
-    websiteUrl: "https://www.shengsuanyun.com",
-  },
-  {
-    id: "ccsub",
-    name: "CCSub",
-    category: "aggregator",
-    baseUrl: "https://www.ccsub.net/v1",
-    protocol: "responses",
-    model: "gpt-5.5",
-    websiteUrl: "https://www.ccsub.net",
   },
 
   // ── 第三方 ──

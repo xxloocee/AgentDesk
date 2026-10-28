@@ -1,5 +1,6 @@
 use anyhow::{Context, bail};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::time::Duration;
@@ -44,7 +45,7 @@ impl CdpBrowserIdentity {
 }
 
 /// Returns whether the requested loopback port exposes a CDP target list.
-pub(crate) fn endpoint_available(debug_port: u16) -> bool {
+pub fn endpoint_available(debug_port: u16) -> bool {
     [
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), debug_port),
         SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), debug_port),
@@ -89,6 +90,9 @@ fn probe_endpoint(address: SocketAddr, debug_port: u16) -> bool {
 }
 
 fn response_contains_codex_target(response: &[u8], debug_port: u16) -> bool {
+    if response.len() > CDP_PROBE_MAX_BYTES {
+        return false;
+    }
     let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
         return false;
     };
@@ -100,11 +104,16 @@ fn response_contains_codex_target(response: &[u8], debug_port: u16) -> bool {
     if !status_ok {
         return false;
     }
-    let Ok(targets) = serde_json::from_slice::<Vec<CdpTarget>>(&response[header_end + 4..]) else {
+    let Some(body) = decode_probe_response_body(&headers, &response[header_end + 4..]) else {
+        return false;
+    };
+    let Ok(targets) = serde_json::from_slice::<Vec<CdpTarget>>(&body) else {
         return false;
     };
     targets.iter().any(|target| {
-        is_primary_codex_page_target(target)
+        is_injectable_page_target(target)
+            // 主窗口标题会随产品名称或页面状态变化；与注入目标选择保持一致。
+            && (is_primary_codex_page_target(target) || is_exact_codex_app_main_target(target))
             && target
                 .url
                 .trim()
@@ -115,6 +124,73 @@ fn response_contains_codex_target(response: &[u8], debug_port: u16) -> bool {
                 .as_deref()
                 .is_some_and(|url| validate_cdp_websocket_url(url, debug_port).is_ok())
     })
+}
+
+// CDP 的 HTTP/1.1 响应可能使用 chunked，不能把分块长度直接交给 JSON 解析器。
+fn decode_probe_response_body(headers: &str, body: &[u8]) -> Option<Vec<u8>> {
+    let mut chunked = false;
+    let mut content_length = None;
+    for line in headers.lines().skip(1) {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("transfer-encoding") {
+            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
+                return None;
+            }
+            chunked = true;
+        } else if name.trim().eq_ignore_ascii_case("content-length") {
+            let length = value.trim().parse::<usize>().ok()?;
+            if content_length.is_some_and(|previous| previous != length) {
+                return None;
+            }
+            content_length = Some(length);
+        }
+    }
+    if chunked {
+        if content_length.is_some() {
+            return None;
+        }
+        decode_probe_chunked_body(body)
+    } else if let Some(length) = content_length {
+        body.get(..length).map(<[u8]>::to_vec)
+    } else {
+        Some(body.to_vec())
+    }
+}
+
+fn decode_probe_chunked_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut decoded = Vec::new();
+    let mut offset = 0;
+    loop {
+        let remaining = body.get(offset..)?;
+        let line_end = remaining.windows(2).position(|window| window == b"\r\n")?;
+        let size_line = std::str::from_utf8(&remaining[..line_end]).ok()?;
+        let size = usize::from_str_radix(size_line.split(';').next()?.trim(), 16).ok()?;
+        offset += line_end + 2;
+        if size == 0 {
+            // 终止块后允许 trailer，但必须读到完整的空行才算响应完整。
+            loop {
+                let remaining = body.get(offset..)?;
+                let line_end = remaining.windows(2).position(|window| window == b"\r\n")?;
+                if line_end == 0 {
+                    return Some(decoded);
+                }
+                if !remaining[..line_end].contains(&b':') {
+                    return None;
+                }
+                offset += line_end + 2;
+            }
+        }
+        let chunk_end = offset.checked_add(size)?;
+        let terminator_end = chunk_end.checked_add(2)?;
+        if body.get(chunk_end..terminator_end)? != b"\r\n" {
+            return None;
+        }
+        if decoded.len().checked_add(size)? > CDP_PROBE_MAX_BYTES {
+            return None;
+        }
+        decoded.extend_from_slice(body.get(offset..chunk_end)?);
+        offset = terminator_end;
+    }
 }
 
 pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
@@ -355,11 +431,172 @@ fn is_chatgpt_desktop_page(title: &str, url: &str) -> bool {
             || url.starts_with("data:text/html"))
 }
 
+/// 拓展可注入的 Codex 页面种类。管理页、ChatGPT 网页不在此列。
+pub const EXTENSION_CDP_KINDS: [&str; 3] = ["main", "avatar-overlay", "quick-chat"];
+
+pub fn extension_cdp_kind(target: &CdpTarget) -> Option<&'static str> {
+    if !is_injectable_page_target(target) || !is_codex_app_page_target(target) {
+        return None;
+    }
+    if is_avatar_overlay_page_target(target) {
+        Some("avatar-overlay")
+    } else if is_quick_chat_page_target(target) {
+        Some("quick-chat")
+    } else {
+        Some("main")
+    }
+}
+
+pub fn extension_cdp_target_public(target: &CdpTarget) -> Option<Value> {
+    Some(json!({
+        "id": target.id,
+        "title": target.title,
+        "url": target.url,
+        "kind": extension_cdp_kind(target)?,
+    }))
+}
+
+pub fn select_extension_cdp_targets<'a>(
+    targets: &'a [CdpTarget],
+    target_id: Option<&str>,
+    kind: Option<&str>,
+) -> anyhow::Result<Vec<&'a CdpTarget>> {
+    if target_id.is_none() && kind.is_none() {
+        bail!("target_id 或 kind 必须提供其一");
+    }
+    if let Some(kind) = kind {
+        if !EXTENSION_CDP_KINDS.contains(&kind) {
+            bail!("不支持的 CDP kind：{kind}");
+        }
+    }
+    let selected = targets
+        .iter()
+        .filter(|target| {
+            let Some(target_kind) = extension_cdp_kind(target) else {
+                return false;
+            };
+            target_id.is_none_or(|id| target.id == id)
+                && kind.is_none_or(|expected| target_kind == expected)
+        })
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        bail!("没有匹配的 CDP 页面");
+    }
+    Ok(selected)
+}
+
+pub async fn list_extension_cdp_targets(debug_port: u16) -> anyhow::Result<Value> {
+    let targets = list_targets(debug_port).await?;
+    Ok(json!({
+        "status": "ok",
+        "targets": targets
+            .iter()
+            .filter_map(extension_cdp_target_public)
+            .collect::<Vec<_>>(),
+    }))
+}
+
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    fn target_body(title: &str, url: &str) -> String {
+        serde_json::json!([{
+            "id": "codex",
+            "type": "page",
+            "title": title,
+            "url": url,
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9229/devtools/page/1"
+        }])
+        .to_string()
+    }
+
+    #[test]
+    fn response_parser_accepts_chunked_targets_with_extensions_and_trailers() {
+        let body = target_body("Codex", "app://-/index.html");
+        let (first, second) = body.split_at(body.len() / 2);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: Chunked\r\nConnection: close\r\n\r\n{:x};fixture=yes\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\nX-Fixture: done\r\n\r\n",
+            first.len(),
+            second.len()
+        );
+
+        assert!(response_contains_codex_target(response.as_bytes(), 9229));
+    }
+
+    #[test]
+    fn response_parser_accepts_app_main_independently_of_window_title() {
+        for title in ["ChatGPT", ""] {
+            let body = target_body(title, "app://-/index.html");
+            let targets = serde_json::from_str::<Vec<CdpTarget>>(&body).unwrap();
+            assert!(pick_injectable_codex_page_target(&targets).is_ok());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+                body.len()
+            );
+
+            assert!(response_contains_codex_target(response.as_bytes(), 9229));
+        }
+    }
+
+    #[test]
+    fn response_parser_rejects_incomplete_or_conflicting_body_framing() {
+        let body = target_body("Codex", "app://-/index.html");
+        let encoded = format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len());
+        let headers = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        for prefix in 0..encoded.len() {
+            let response = format!("{headers}{}", &encoded[..prefix]);
+            assert!(!response_contains_codex_target(response.as_bytes(), 9229));
+        }
+        for response in [
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len() + 1
+            ),
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: {}\r\n\r\n{encoded}",
+                body.len()
+            ),
+            format!("{headers}ffffffffffffffff\r\n{body}\r\n0\r\n\r\n"),
+            format!("{headers}1\r\n{body}\r\n0\r\n\r\n"),
+        ] {
+            assert!(!response_contains_codex_target(response.as_bytes(), 9229));
+        }
+    }
+
+    #[test]
+    fn response_parser_keeps_target_and_websocket_restrictions() {
+        for (url, websocket) in [
+            (
+                "app://-/index.html?initialRoute=%2Favatar-overlay",
+                "ws://127.0.0.1:9229/devtools/page/1",
+            ),
+            (
+                "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm",
+                "ws://127.0.0.1:9229/devtools/page/1",
+            ),
+            ("app://-/index.html", "ws://127.0.0.1:9230/devtools/page/1"),
+            (
+                "app://-/index.html",
+                "ws://203.0.113.1:9229/devtools/page/1",
+            ),
+        ] {
+            let body = target_body("ChatGPT", url)
+                .replace("ws://127.0.0.1:9229/devtools/page/1", websocket);
+            let response = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}");
+            assert!(!response_contains_codex_target(response.as_bytes(), 9229));
+        }
+    }
+
+    #[test]
+    fn response_parser_accepts_close_delimited_targets() {
+        let body = target_body("Codex", "app://-/index.html");
+        let response = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}");
+
+        assert!(response_contains_codex_target(response.as_bytes(), 9229));
+    }
 
     fn serve_once(build_body: impl FnOnce(u16) -> String) -> (u16, thread::JoinHandle<()>) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -432,5 +669,100 @@ mod endpoint_tests {
 
         assert!(!endpoint_available(port));
         server.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod extension_target_tests {
+    use super::*;
+
+    fn target(id: &str, title: &str, url: &str, websocket: Option<&str>) -> CdpTarget {
+        CdpTarget {
+            id: id.to_string(),
+            target_type: "page".to_string(),
+            title: title.to_string(),
+            url: url.to_string(),
+            web_socket_debugger_url: websocket.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn classifies_codex_app_pages_and_hides_manager() {
+        assert_eq!(
+            extension_cdp_kind(&target(
+                "main",
+                "Codex",
+                "app://-/index.html",
+                Some("ws://127.0.0.1:9229/devtools/page/1"),
+            )),
+            Some("main")
+        );
+        assert_eq!(
+            extension_cdp_kind(&target(
+                "pet",
+                "overlay",
+                "app://-/index.html?initialRoute=%2Favatar-overlay",
+                Some("ws://127.0.0.1:9229/devtools/page/2"),
+            )),
+            Some("avatar-overlay")
+        );
+        assert_eq!(
+            extension_cdp_kind(&target(
+                "qc",
+                "quick",
+                "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat",
+                Some("ws://127.0.0.1:9229/devtools/page/3"),
+            )),
+            Some("quick-chat")
+        );
+        assert_eq!(
+            extension_cdp_kind(&target(
+                "manager",
+                "Codex++ 管理工具",
+                "http://127.0.0.1:1420/",
+                Some("ws://127.0.0.1:9229/devtools/page/4"),
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn public_target_omits_websocket_url() {
+        let public = extension_cdp_target_public(&target(
+            "pet",
+            "overlay",
+            "app://-/index.html?initialRoute=%2Favatar-overlay",
+            Some("ws://127.0.0.1:9229/devtools/page/2"),
+        ))
+        .unwrap();
+        assert_eq!(public["kind"], "avatar-overlay");
+        assert!(public.get("webSocketDebuggerUrl").is_none());
+        assert!(public.get("web_socket_debugger_url").is_none());
+        assert!(!public.to_string().contains("ws://"));
+    }
+
+    #[test]
+    fn select_requires_kind_or_target_id_and_filters() {
+        let targets = vec![
+            target(
+                "main",
+                "Codex",
+                "app://-/index.html",
+                Some("ws://127.0.0.1:9229/devtools/page/1"),
+            ),
+            target(
+                "pet",
+                "overlay",
+                "app://-/index.html?initialRoute=%2Favatar-overlay",
+                Some("ws://127.0.0.1:9229/devtools/page/2"),
+            ),
+        ];
+        assert!(select_extension_cdp_targets(&targets, None, None).is_err());
+        let overlay = select_extension_cdp_targets(&targets, None, Some("avatar-overlay")).unwrap();
+        assert_eq!(overlay.len(), 1);
+        assert_eq!(overlay[0].id, "pet");
+        let by_id = select_extension_cdp_targets(&targets, Some("main"), None).unwrap();
+        assert_eq!(by_id[0].id, "main");
+        assert!(select_extension_cdp_targets(&targets, None, Some("browser")).is_err());
     }
 }

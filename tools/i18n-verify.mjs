@@ -21,7 +21,10 @@ const ts = require("typescript");
 
 const SRC_FILES = [
   "src/App.tsx",
+  "src/agent-cache.tsx",
   "src/components/ProviderPresetSelector.tsx",
+  "src/ClaudeProviderPage.tsx",
+  "src/vlm-test-translation.ts",
 ];
 
 // ── Collect the keys referenced by t()/tf() across the source. ──────────────
@@ -40,8 +43,9 @@ function scanFile(relPath) {
       const literal =
         arg && (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) ? arg.text : null;
       if (literal !== null) {
-        if (fn === "t") usedPlain.add(literal);
-        else if (fn === "tf") usedTemplate.add(literal);
+        // tr 是 vlm-test-translation.ts 注入的翻译回调：1 参->plain，2 参->template。
+        if (fn === "t" || (fn === "tr" && node.arguments.length === 1)) usedPlain.add(literal);
+        else if (fn === "tf" || (fn === "tr" && node.arguments.length >= 2)) usedTemplate.add(literal);
       }
     }
     ts.forEachChild(node, visit);
@@ -50,6 +54,22 @@ function scanFile(relPath) {
 }
 
 for (const f of SRC_FILES) scanFile(f);
+
+// 增强设置项清单的文案在管理器里以 t(item.title) 这类动态参数翻译，扫描调用点看不到，
+// 这里按 src/enhancement-catalog.ts 的 enhancementCatalogStrings() 同样的字段补进来。
+const catalog = JSON.parse(
+  readFileSync(path.join(repoRoot, "crates", "codex-plus-core", "assets", "enhancement-settings.json"), "utf8"),
+);
+for (const group of catalog.groups) {
+  usedPlain.add(group.title);
+  if (group.description) usedPlain.add(group.description);
+}
+for (const item of catalog.items) {
+  usedPlain.add(item.title);
+  usedPlain.add(item.description);
+  if (item.descriptionWhenEnhancementsOn) usedPlain.add(item.descriptionWhenEnhancementsOn);
+  for (const option of item.options ?? []) usedPlain.add(option.label);
+}
 
 // ── Read the dictionary keys out of i18n-en.ts. ─────────────────────────────
 const dictSource = readFileSync(path.join(appRoot, "src", "i18n-en.ts"), "utf8");

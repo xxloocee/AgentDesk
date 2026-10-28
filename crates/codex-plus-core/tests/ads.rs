@@ -82,6 +82,31 @@ async fn fetch_ad_list_returns_only_ergouzi() {
     assert_eq!(ads[0]["id"], json!("ergouzi"));
 }
 
+#[test]
+fn remote_top_ad_slots_cannot_reintroduce_promotions() {
+    let remote = json!({
+        "id": "remote-promotion",
+        "type": "sponsor",
+        "title": "Remote",
+        "description": "Remote promotion",
+        "url": "https://example.test",
+    });
+    for slot in ["top_ad", "topAd", "topAds"] {
+        let mut source = json!({ "version": 1, "ads": [remote.clone()] });
+        source[slot] = if slot == "topAds" {
+            json!([remote.clone()])
+        } else {
+            remote.clone()
+        };
+        let payload = normalize_ad_payload(source);
+        assert_eq!(payload["ads"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["ads"][0]["id"], json!("ergouzi"));
+        assert!(payload.get("topAd").is_none());
+        assert!(payload.get("topAds").is_none());
+        assert!(payload.get("top_ad").is_none());
+    }
+}
+
 #[tokio::test]
 async fn fetch_ad_list_from_urls_still_collapses_to_ergouzi() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

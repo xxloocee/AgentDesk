@@ -8,9 +8,9 @@ use sha2::{Digest, Sha256};
 
 use crate::dream_skin_library::DreamSkinThemeSummary;
 
-pub const COMMUNITY_API_ORIGIN: &str = "https://community.agentdesk.invalid";
-pub const COMMUNITY_GALLERY_URL: &str = "";
-pub const COMMUNITY_STUDIO_URL: &str = "";
+pub const COMMUNITY_API_ORIGIN: &str = "https://api.dreamskin.cc";
+pub const COMMUNITY_GALLERY_URL: &str = "https://dreamskin.cc/gallery";
+pub const COMMUNITY_STUDIO_URL: &str = "https://dreamskin.cc/studio";
 
 const CACHE_FILE: &str = "dream-skin/community/catalog.json";
 const PENDING_LINK_FILE: &str = "dream-skin/community/pending-apply.json";

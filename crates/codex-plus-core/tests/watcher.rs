@@ -1,8 +1,12 @@
 use codex_plus_core::watcher::{
-    build_spawn_launcher_command, build_watcher_install_plan, cdp_listening, codex_process_ids,
-    disable_watcher_at, enable_watcher_at, filter_killable_launcher_processes,
-    process_id_is_running, process_ids_still_running, should_recover_stale_launcher,
-    watcher_disabled_flag,
+    MACOS_WATCHER_LABEL, build_spawn_launcher_command, build_watcher_install_plan, cdp_listening,
+    codex_process_ids, disable_watcher_at, enable_watcher_at, filter_killable_launcher_processes,
+    macos_launcher_process_names, macos_launch_agent_installed_at, macos_launch_agent_path_at,
+    macos_launch_agent_plist, process_id_is_running, process_ids_still_running,
+    remove_macos_launch_agent_at, should_recover_stale_launcher, watcher_disabled_flag,
+    set_watcher_start_codex_at, set_watcher_start_codex_on_open_at, set_watcher_start_minimized_at,
+    watcher_start_codex_at, watcher_start_codex_on_open_at, watcher_start_minimized_at,
+    write_macos_launch_agent_at,
 };
 
 #[cfg(windows)]
@@ -21,6 +25,14 @@ fn cdp_listening_returns_true_for_bound_loopback_port() {
 
 #[test]
 fn cdp_listening_returns_true_for_bound_ipv6_loopback_port() {
+    // Windows 环境可能禁用 IPv6 loopback 访问；不可用时跳过这个环境专用回归。
+    let probe_listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+    let probe_port = probe_listener.local_addr().unwrap().port();
+    if std::net::TcpStream::connect(("::1", probe_port)).is_err() {
+        return;
+    }
+    drop(probe_listener);
+
     let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
     let port = listener.local_addr().unwrap().port();
 
@@ -50,26 +62,105 @@ fn watcher_enable_and_disable_toggle_flag() {
 }
 
 #[test]
-fn watcher_install_plan_registers_rust_launcher_at_logon() {
+fn watcher_start_minimized_is_a_separate_persistent_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!watcher_start_minimized_at(dir.path()));
+
+    set_watcher_start_minimized_at(dir.path(), true).unwrap();
+    assert!(watcher_start_minimized_at(dir.path()));
+
+    set_watcher_start_minimized_at(dir.path(), false).unwrap();
+    assert!(!watcher_start_minimized_at(dir.path()));
+}
+
+#[test]
+fn watcher_start_codex_is_a_separate_persistent_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!watcher_start_codex_at(dir.path()));
+
+    set_watcher_start_codex_at(dir.path(), true).unwrap();
+    assert!(watcher_start_codex_at(dir.path()));
+
+    set_watcher_start_codex_at(dir.path(), false).unwrap();
+    assert!(!watcher_start_codex_at(dir.path()));
+}
+
+#[test]
+fn watcher_start_codex_on_open_is_a_separate_persistent_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!watcher_start_codex_on_open_at(dir.path()));
+
+    set_watcher_start_codex_on_open_at(dir.path(), true).unwrap();
+    assert!(watcher_start_codex_on_open_at(dir.path()));
+
+    set_watcher_start_codex_on_open_at(dir.path(), false).unwrap();
+    assert!(!watcher_start_codex_on_open_at(dir.path()));
+}
+
+#[test]
+fn macos_launch_agent_registers_the_gui_at_login() {
+    let home = tempfile::tempdir().unwrap();
+    let launcher = home
+        .path()
+        .join("Codex++.app/Contents/MacOS/CodexPlusPlus");
+    assert!(!macos_launch_agent_installed_at(home.path()));
+
+    let path = write_macos_launch_agent_at(home.path(), &launcher).unwrap();
+
+    assert_eq!(path, macos_launch_agent_path_at(home.path()));
+    assert_eq!(
+        path.file_name().unwrap().to_string_lossy(),
+        format!("{MACOS_WATCHER_LABEL}.plist")
+    );
+    assert!(
+        path.parent()
+            .unwrap()
+            .ends_with(std::path::Path::new("Library").join("LaunchAgents"))
+    );
+    assert!(macos_launch_agent_installed_at(home.path()));
+
+    let plist = std::fs::read_to_string(&path).unwrap();
+    assert!(plist.contains(&format!("<string>{MACOS_WATCHER_LABEL}</string>")));
+    assert!(plist.contains(&launcher.to_string_lossy().to_string()));
+    assert!(plist.contains("<string>--autostart</string>"));
+    assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
+
+    remove_macos_launch_agent_at(home.path()).unwrap();
+    assert!(!macos_launch_agent_installed_at(home.path()));
+    // 重复移除是幂等的：界面关掉开关时不会因为文件已不存在而报错。
+    remove_macos_launch_agent_at(home.path()).unwrap();
+}
+
+#[test]
+fn macos_launch_agent_plist_escapes_the_executable_path() {
+    let plist = macos_launch_agent_plist(std::path::Path::new(
+        "/Applications/A&B <x>.app/Contents/MacOS/CodexPlusPlus",
+    ));
+
+    assert!(plist.contains("/Applications/A&amp;B &lt;x&gt;.app/Contents/MacOS/CodexPlusPlus"));
+    assert!(!plist.contains("A&B <x>"));
+}
+
+#[test]
+fn watcher_install_plan_opens_the_gui_at_logon() {
     let plan = build_watcher_install_plan("C:/Tools/codex-plus-plus.exe".into(), 9333);
 
     assert_eq!(plan.run_value_name, "CodexPlusPlusWatcher");
     assert_eq!(
         plan.run_value,
-        "\"C:/Tools/codex-plus-plus.exe\" --debug-port 9333"
+        "\"C:/Tools/codex-plus-plus.exe\" --autostart"
     );
     assert_eq!(plan.shortcut_name, "CodexPlusPlusWatcher.lnk");
     assert_eq!(plan.shortcut_target, "C:/Tools/codex-plus-plus.exe");
-    assert_eq!(plan.shortcut_arguments, "--debug-port 9333");
+    assert_eq!(plan.shortcut_arguments, "--autostart");
 }
 
 #[test]
-fn spawn_launcher_command_points_to_silent_binary_only() {
+fn startup_command_opens_only_the_unified_gui() {
     let command = build_spawn_launcher_command("C:/Tools/codex-plus-plus.exe", 9444);
 
     assert_eq!(command[0], "C:/Tools/codex-plus-plus.exe");
-    assert!(command.contains(&"--debug-port".to_string()));
-    assert!(command.contains(&"9444".to_string()));
+    assert_eq!(command, ["C:/Tools/codex-plus-plus.exe", "--autostart"]);
     assert!(!command.iter().any(|part| part.contains("manager")));
 }
 
@@ -115,6 +206,26 @@ fn codex_process_filter_keeps_chatgpt_desktop_package_processes() {
 }
 
 #[test]
+fn codex_process_filter_recognizes_beta_desktop_without_matching_cli_or_other_apps() {
+    let processes = [
+        (
+            31,
+            r"C:\Program Files\WindowsApps\OpenAI.CodexBeta_26.727.4816.0_x64__abc\app\ChatGPT (Beta).exe",
+        ),
+        (
+            32,
+            r"C:\Program Files\WindowsApps\OpenAI.CodexBeta_26.727.4816.0_x64__abc\app\resources\codex.exe",
+        ),
+        (
+            33,
+            r"C:\Program Files\WindowsApps\Other.App_1.0_x64__abc\app\ChatGPT (Beta).exe",
+        ),
+        (34, r"D:\Portable\ChatGPT (Beta).exe"),
+    ];
+    assert_eq!(codex_process_ids(processes), vec![31]);
+}
+
+#[test]
 fn launcher_process_filter_protects_current_process_ancestry() {
     let processes = [
         (10, 0, "codex-plus-plus.exe"),
@@ -125,6 +236,14 @@ fn launcher_process_filter_protects_current_process_ancestry() {
     ];
 
     assert_eq!(filter_killable_launcher_processes(processes, 30), vec![40]);
+}
+
+#[test]
+fn macos_launcher_process_names_cover_development_and_packaged_binaries() {
+    assert_eq!(
+        macos_launcher_process_names(),
+        ["codex-plus-plus", "CodexPlusPlus"]
+    );
 }
 
 #[test]
@@ -274,6 +393,34 @@ fn session_index_cleanup_process_guard_blocks_desktop_apps_but_not_cli() {
         vec![11, 12, 13]
     );
     assert_eq!(find_codex_processes_from_snapshot(&processes), vec![11, 13]);
+}
+
+#[cfg(windows)]
+#[test]
+fn beta_desktop_is_included_in_watcher_and_session_cleanup_guard() {
+    let processes = [
+        WindowsProcessInfo {
+            process_id: 61,
+            parent_process_id: 0,
+            exe_file: "ChatGPT (Beta).exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"C:\Program Files\WindowsApps\OpenAI.CodexBeta_26.727.4816.0_x64__abc\app\ChatGPT (Beta).exe",
+            )),
+        },
+        WindowsProcessInfo {
+            process_id: 62,
+            parent_process_id: 0,
+            exe_file: "codex.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"C:\Program Files\WindowsApps\OpenAI.CodexBeta_26.727.4816.0_x64__abc\app\resources\codex.exe",
+            )),
+        },
+    ];
+    assert_eq!(find_codex_processes_from_snapshot(&processes), vec![61]);
+    assert_eq!(
+        find_session_index_cleanup_blocking_processes_from_snapshot(&processes),
+        vec![61]
+    );
 }
 
 #[cfg(windows)]

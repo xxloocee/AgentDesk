@@ -7,10 +7,42 @@ use std::thread;
 use codex_plus_core::model_catalog::{
     read_codex_model_catalog, read_codex_model_catalog_from_home,
 };
+use codex_plus_core::model_suffix::collect_catalog_entries;
 use codex_plus_core::settings::{
     BackendSettings, RelayMode, RelayProfile, RelayProtocol, SettingsStore,
 };
 use serde_json::json;
+
+#[test]
+fn catalog_entries_apply_manual_windows_case_insensitively() {
+    // 上游 /models 返回的 id 与本地保存的 key 常只差大小写；精确查表会让用户
+    // 配好的窗口整条落空，最后露出上游/Codex 默认的窗口。
+    let windows = HashMap::from([("DeepSeek-Flash".to_string(), "1m".to_string())]);
+    let compacts = HashMap::from([("DeepSeek-Flash".to_string(), "50%".to_string())]);
+    let entries = collect_catalog_entries("deepseek-flash\nglm-5.3", &windows, &compacts, "");
+    let deepseek = entries
+        .iter()
+        .find(|entry| entry.slug == "deepseek-flash")
+        .expect("模型条目缺失");
+    assert_eq!(deepseek.suffix_window, Some(1_000_000));
+    assert_eq!(deepseek.auto_compact_percent, Some(50_000_000));
+    // 没有配置窗口的模型不该被牵连。
+    let glm = entries
+        .iter()
+        .find(|entry| entry.slug == "glm-5.3")
+        .expect("模型条目缺失");
+    assert_eq!(glm.suffix_window, None);
+}
+
+#[test]
+fn catalog_entries_strip_suffix_from_row_name_and_look_up_window() {
+    // 行名带 [1M] 后缀时窗口来自后缀本身；没有后缀时来自 model_windows。
+    let entries =
+        collect_catalog_entries("deepseek-v4-pro[1M]", &HashMap::new(), &HashMap::new(), "");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].slug, "deepseek-v4-pro");
+    assert_eq!(entries[0].suffix_window, Some(1_000_000));
+}
 
 #[tokio::test]
 async fn model_catalog_fetches_models_from_codex_config_provider() {
@@ -224,6 +256,7 @@ async fn model_catalog_uses_active_relay_profile_model_list_and_actual_provider(
         store.save(&settings).unwrap();
         let result = read_codex_model_catalog().await;
 
+        settings = store.load().unwrap();
         settings.relay_profiles[0].relay_mode = RelayMode::Official;
         settings.relay_profiles[0].official_mix_api_key = false;
         settings.relay_profiles[0].config_contents = "model = \"qwen3-coder\"\n".to_string();
@@ -456,6 +489,128 @@ base_url = "{}"
     assert_eq!(requests[0].path, "/v1/models");
 }
 
+#[tokio::test]
+async fn model_catalog_surfaces_business_error_from_http_200_envelope() {
+    // 智谱 Codex 专属端点（/api/v1）在 key 缺失或无效时返回 HTTP 200 + 业务错误信封，
+    // 之前只认状态码，会被解析成“0 个模型”，真因完全不可见（#2190）。
+    let temp = tempfile::tempdir().unwrap();
+    let server = spawn_models_server_with_response(
+        200,
+        json!({"code": 401, "msg": "令牌已过期或验证不正确", "success": false}).to_string(),
+    );
+    write_config(
+        temp.path(),
+        &format!(
+            r#"
+model = "glm-5.3"
+model_provider = "ZAI"
+
+[model_providers.ZAI]
+name = "ZAI"
+base_url = "{}"
+experimental_bearer_token = "bad-key"
+wire_api = "responses"
+"#,
+            server.base_url
+        ),
+    );
+
+    let result = read_codex_model_catalog_from_home(
+        temp.path(),
+        &HashMap::new(),
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["sources"][0]["status"], "failed");
+    assert_eq!(result["sources"][0]["message"], "令牌已过期或验证不正确");
+    assert_eq!(result["models"], json!([]));
+    server.finish();
+}
+
+#[tokio::test]
+async fn model_catalog_appends_upstream_reason_to_http_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = spawn_models_server_with_response(
+        401,
+        json!({
+            "error": {
+                "message": "Incorrect API key provided",
+                "type": "incorrect_api_key_error"
+            }
+        })
+        .to_string(),
+    );
+    write_config(
+        temp.path(),
+        &format!(
+            r#"
+model = "qwen3-coder"
+model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "{}"
+experimental_bearer_token = "relay-key"
+"#,
+            server.base_url
+        ),
+    );
+
+    let result = read_codex_model_catalog_from_home(
+        temp.path(),
+        &HashMap::new(),
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["sources"][0]["status"], "failed");
+    let message = result["sources"][0]["message"].as_str().unwrap();
+    assert!(message.starts_with("HTTP 401"), "{message}");
+    assert!(message.contains("Incorrect API key provided"), "{message}");
+    server.finish();
+}
+
+#[tokio::test]
+async fn model_catalog_parses_gemini_style_model_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = spawn_models_server(json!({
+        "models": [
+            {"name": "models/gemini-2.5-pro"},
+            {"name": "models/gemini-2.5-flash"}
+        ]
+    }));
+    write_config(
+        temp.path(),
+        &format!(
+            r#"
+model_provider = "gemini"
+
+[model_providers.gemini]
+name = "Gemini"
+base_url = "{}"
+"#,
+            server.base_url
+        ),
+    );
+
+    let result = read_codex_model_catalog_from_home(
+        temp.path(),
+        &HashMap::new(),
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+    )
+    .await;
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["models"],
+        json!(["gemini-2.5-pro", "gemini-2.5-flash"])
+    );
+    server.finish();
+}
+
 fn write_config(home: &Path, contents: &str) {
     std::fs::write(home.join("config.toml"), contents.trim_start()).unwrap();
 }
@@ -477,17 +632,23 @@ struct ModelsRequest {
 }
 
 fn spawn_models_server(payload: serde_json::Value) -> ModelsServer {
+    spawn_models_server_with_response(200, payload.to_string())
+}
+
+fn spawn_models_server_with_response(status: u16, body: String) -> ModelsServer {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let base_url = format!("http://{address}");
     listener
         .set_nonblocking(true)
         .expect("listener should switch to nonblocking mode");
-    let models_body = payload.to_string();
+    let models_body = body;
     let handle = thread::spawn(move || {
         let started = std::time::Instant::now();
         let mut requests = Vec::new();
-        while requests.is_empty() && started.elapsed() < std::time::Duration::from_secs(2) {
+        // 接受窗口留足时间：并行跑测试或机器负载高时，客户端连接可能晚到，
+        // 2 秒窗口会造成「connection refused」偶发失败（CI/本地实测）。
+        while requests.is_empty() && started.elapsed() < std::time::Duration::from_secs(30) {
             let Ok((mut stream, _)) = listener.accept() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
@@ -495,7 +656,7 @@ fn spawn_models_server(payload: serde_json::Value) -> ModelsServer {
             let mut buffer = [0u8; 4096];
             let mut read = 0;
             let read_started = std::time::Instant::now();
-            while read == 0 && read_started.elapsed() < std::time::Duration::from_secs(2) {
+            while read == 0 && read_started.elapsed() < std::time::Duration::from_secs(10) {
                 match stream.read(&mut buffer) {
                     Ok(0) => std::thread::sleep(std::time::Duration::from_millis(10)),
                     Ok(bytes) => read = bytes,
@@ -520,11 +681,11 @@ fn spawn_models_server(payload: serde_json::Value) -> ModelsServer {
                 .find_map(|line| line.strip_prefix("authorization: "))
                 .unwrap_or_default()
                 .to_string();
-            let (status, body) = (200, models_body.as_str());
             let response = format!(
-                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
+                "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                http_reason(status),
+                models_body.len(),
+                models_body
             );
             stream.write_all(response.as_bytes()).unwrap();
             requests.push(ModelsRequest {
@@ -535,4 +696,15 @@ fn spawn_models_server(payload: serde_json::Value) -> ModelsServer {
         requests
     });
     ModelsServer { base_url, handle }
+}
+
+fn http_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "Error",
+    }
 }

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
+
 use crate::settings::{RelayProfile, SettingsStore};
 use serde_json::{Map, Value, json};
 
@@ -25,6 +27,10 @@ struct ModelSource {
     name: String,
     base_url: String,
     api_key: String,
+    /// 供应商自定义请求头（issue #1685）。非供应商来源为空。
+    headers: Vec<crate::settings::RelayHeaderKeyValue>,
+    /// Anthropic Messages 协议：模型列表要 `x-api-key` + `anthropic-version`，且默认只返回 20 条。
+    anthropic: bool,
 }
 
 #[derive(Debug, Default)]
@@ -40,7 +46,12 @@ pub async fn read_codex_model_catalog() -> Value {
     if settings_path.exists() {
         if let Ok(settings) = SettingsStore::new(settings_path).load() {
             let profile = settings.active_relay_profile();
-            let catalog = relay_profile_model_catalog_value(&home, &profile);
+            let catalog = if let Some(aggregate) = crate::aggregate_catalog::active_model_aggregation(&settings) {
+                crate::aggregate_catalog::catalog_summary(&home, &settings, &aggregate)
+                    .unwrap_or_else(|_| relay_profile_model_catalog_value(&home, &profile))
+            } else {
+                relay_profile_model_catalog_value(&home, &profile)
+            };
             if catalog
                 .get("models")
                 .and_then(Value::as_array)
@@ -50,7 +61,12 @@ pub async fn read_codex_model_catalog() -> Value {
             }
         }
     }
-    let env = std::env::vars().collect::<HashMap<_, _>>();
+    let env = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let name = name.into_string().ok()?;
+            Some((name, value.to_string_lossy().into_owned()))
+        })
+        .collect::<HashMap<_, _>>();
     let client = match crate::http_client::proxied_client("CodexPlusPlus/1.0") {
         Ok(client) => client,
         Err(error) => {
@@ -77,14 +93,19 @@ fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Val
     let models = relay_profile_model_ids(profile);
     let model = profile.model.trim().to_string();
     let codex_model_provider = codex_model_provider_for_relay_profile(home, profile);
-    let default_model = models.first().cloned().unwrap_or_default();
+    let configured_model = crate::relay_config::relay_profile_model(profile);
+    let default_model = if models.iter().any(|item| item == &configured_model) {
+        configured_model
+    } else {
+        models.first().cloned().unwrap_or_default()
+    };
     let provider_name = if profile.name.trim().is_empty() {
         profile.id.trim()
     } else {
         profile.name.trim()
     };
     let model_count = models.len();
-    let model_metadata = model_ui_metadata_map(&models);
+    let model_metadata = relay_profile_model_ui_metadata_map(profile, &models);
     json!({
         "status": if models.is_empty() { "not_configured" } else { "ok" },
         "path": home.join("config.toml").to_string_lossy(),
@@ -138,14 +159,151 @@ fn relay_profile_model_ids(profile: &RelayProfile) -> Vec<String> {
     )
 }
 
+/// 当前活动供应商在 Codex 模型列表里公布的模型 ID 集合，用于清理历史残留引用
+/// （例如换目录后模型选择器里还留着的 `ccs-xxx/model`）。
+///
+/// - 模型聚合：目录里的全部 `cpx-*`——目录由 Codex++ 生成，这份集合是权威的；
+///   成员未就绪导致目录算不出来时返回空集，调用方据此跳过清理，绝不误删。
+/// - 官方登录且没混用 API Key：模型列表由 Codex 自己决定，返回空集表示「不要清理」。
+/// - 普通 API 供应商：它的 model_list + 当前 model + 模型路由的源模型名，
+///   并同时收下剥掉 `[1M]` 这类窗口后缀的形式，宁可多留不可误删。
+pub fn active_published_model_ids(settings: &crate::settings::BackendSettings) -> HashSet<String> {
+    if let Some(aggregate) = crate::aggregate_catalog::active_model_aggregation(settings) {
+        // 配了默认供应商时，目录外的模型名仍有兜底转发，清「最近使用」会误删可用条目。
+        if crate::aggregate_catalog::default_backs_unbound_models(&aggregate) {
+            return HashSet::new();
+        }
+        return crate::aggregate_catalog::active_model_bindings(settings)
+            .map(|bindings| {
+                bindings
+                    .into_iter()
+                    .map(|binding| binding.catalog_model)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    let profile = settings.active_relay_profile();
+    if profile.relay_mode == crate::settings::RelayMode::Official && !profile.official_mix_api_key {
+        return HashSet::new();
+    }
+    let mut ids = HashSet::new();
+    for model in relay_profile_model_ids(&profile) {
+        let (stripped, _) = crate::model_suffix::parse_model_suffix(&model);
+        if !stripped.is_empty() {
+            ids.insert(stripped);
+        }
+        ids.insert(model);
+    }
+    for route in &profile.model_routes {
+        let model = route.model.trim();
+        if !model.is_empty() {
+            ids.insert(model.to_string());
+        }
+    }
+    ids
+}
+
 fn model_ui_metadata_map(models: &[String]) -> Value {
+    model_ui_metadata_map_with_overrides(models, "")
+}
+
+fn model_ui_metadata_map_with_overrides(models: &[String], user_json: &str) -> Value {
+    let user: Value = serde_json::from_str(user_json).unwrap_or(Value::Null);
     let mut metadata = Map::new();
     for model in models {
-        if let Some(value) = crate::model_suffix::model_ui_metadata(model) {
+        let slug = crate::model_suffix::parse_model_suffix(model).0;
+        let user_override = user.as_object().and_then(|entries| entries.iter()
+            .find(|(key, value)| value.is_object() && crate::model_suffix::parse_model_suffix(key).0.eq_ignore_ascii_case(&slug))
+            .map(|(_, value)| value));
+        if let Some(value) = crate::model_suffix::model_ui_metadata_with_override(model, user_override) {
             metadata.insert(model.clone(), value);
         }
     }
     Value::Object(metadata)
+}
+
+fn relay_profile_model_ui_metadata_map(profile: &RelayProfile, models: &[String]) -> Value {
+    let mut metadata = model_ui_metadata_map_with_overrides(models, &profile.model_metadata)
+        .as_object().cloned().unwrap_or_default();
+    let windows: std::collections::BTreeMap<String, String> =
+        serde_json::from_str::<Value>(&profile.model_windows)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .map(|object| object.into_iter()
+                .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
+                .collect())
+            .unwrap_or_default();
+    let fallback = crate::model_suffix::parse_window_token(&profile.context_window);
+    for model in models {
+        let manual = crate::model_suffix::lookup_model_map(&windows, model)
+            .and_then(|token| crate::model_suffix::parse_window_token(token));
+        if let Some(window) = manual {
+            // 逐模型手工窗口优先级最高，覆盖内置模板。
+            let entry = metadata.entry(model.clone()).or_insert_with(|| json!({}));
+            for field in ["contextWindow", "maxContextWindow", "context_window", "max_context_window"] {
+                entry[field] = json!(window);
+            }
+            continue;
+        }
+        // 没有手工窗口时，供应商级「上下文大小」只作兜底：模型模板里已经声明了
+        // 自己的窗口就别拿全局值盖掉它。否则多模型列表 + 全局窗口会把每个模型都
+        // 压成同一个数，模型自身的真实窗口反而丢失（issue #2590）。
+        let Some(fallback) = fallback else { continue };
+        let entry = metadata.entry(model.clone()).or_insert_with(|| json!({}));
+        for field in ["contextWindow", "maxContextWindow", "context_window", "max_context_window"] {
+            let missing = entry
+                .get(field)
+                .and_then(Value::as_u64)
+                .is_none_or(|existing| existing == 0);
+            if missing {
+                entry[field] = json!(fallback);
+            }
+        }
+    }
+    Value::Object(metadata)
+}
+
+#[cfg(test)]
+mod window_override_tests {
+    use super::*;
+
+    #[test]
+    fn manual_window_precedes_profile_and_builtin_metadata() {
+        let models = vec!["gpt-5.5".to_string(), "vendor-model".to_string()];
+        let profile = RelayProfile {
+            model_windows: r#"{"GPT-5.5[1M]":"1M"}"#.into(),
+            context_window: "128K".into(),
+            ..Default::default()
+        };
+        let metadata = relay_profile_model_ui_metadata_map(&profile, &models);
+        for field in ["contextWindow", "maxContextWindow", "context_window", "max_context_window"] {
+            assert_eq!(metadata["gpt-5.5"][field], 1_000_000);
+            assert_eq!(metadata["vendor-model"][field], 128_000);
+        }
+
+        // issue #2590：全局窗口只兜底，不能盖掉模型模板自带的窗口。
+        // 同一份列表里 gpt-5.5 有内置模板、vendor-model 没有，前者应保持模板值。
+        let builtin_only = relay_profile_model_ui_metadata_map(&RelayProfile::default(), &models);
+        let builtin_window = builtin_only["gpt-5.5"]["contextWindow"]
+            .as_u64()
+            .expect("gpt-5.5 应有内置窗口");
+        assert_ne!(builtin_window, 128_000, "前置条件：内置窗口不应恰好等于全局值");
+        assert_eq!(metadata["gpt-5.5"]["contextWindow"], 1_000_000);
+        let global_only = RelayProfile {
+            context_window: "128K".into(),
+            ..Default::default()
+        };
+        let with_global = relay_profile_model_ui_metadata_map(&global_only, &models);
+        assert_eq!(
+            with_global["gpt-5.5"]["contextWindow"], builtin_window,
+            "全局窗口不应压过内置模板"
+        );
+        assert_eq!(with_global["vendor-model"]["contextWindow"], 128_000);
+
+        let metadata = relay_profile_model_ui_metadata_map(&RelayProfile::default(), &models);
+        assert!(metadata["gpt-5.5"]["contextWindow"].as_u64().is_some());
+        assert!(metadata.get("vendor-model").is_none());
+    }
 }
 
 pub async fn read_codex_model_catalog_from_home(
@@ -424,6 +582,8 @@ fn model_sources_from_environment(
         } else {
             api_key
         },
+        headers: Vec::new(),
+        anthropic: false,
     }]
 }
 
@@ -460,6 +620,8 @@ fn model_source_from_config(
         },
         base_url,
         api_key,
+        headers: Vec::new(),
+        anthropic: false,
     })
 }
 
@@ -503,11 +665,28 @@ fn provider_api_key(
     }
 }
 
+/// 单个模型列表请求的整体预算（发请求 + 读响应体）。模型列表是小体量非流式响应，
+/// 30 秒足够；此前请求没有任何超时，上游不响应时管理器的「获取模型」会永久挂起。
+const MODELS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn fetch_models_from_source(
     client: &reqwest::Client,
     source: &ModelSource,
 ) -> (Vec<String>, Value) {
-    let endpoint = models_endpoint(&source.base_url);
+    fetch_models_from_source_with_timeout(client, source, MODELS_FETCH_TIMEOUT).await
+}
+
+async fn fetch_models_from_source_with_timeout(
+    client: &reqwest::Client,
+    source: &ModelSource,
+    timeout: std::time::Duration,
+) -> (Vec<String>, Value) {
+    let mut endpoint = models_endpoint(&source.base_url);
+    if source.anthropic && !endpoint.is_empty() {
+        // Anthropic 的 /v1/models 默认一页 20 条，一次取满（上限 1000）。
+        endpoint.push(if endpoint.contains('?') { '&' } else { '?' });
+        endpoint.push_str("limit=1000");
+    }
     let mut safe_source = json!({
         "id": source.source_id,
         "type": source.source_type,
@@ -526,23 +705,82 @@ async fn fetch_models_from_source(
     let mut request = client
         .get(&endpoint)
         .header(reqwest::header::ACCEPT, "application/json");
-    if !source.api_key.is_empty() {
+    // 与协议代理、供应商测试共用 relay_headers：显式 Authorization 优先于 API Key。
+    let has_header = |name: &str| source.headers.iter().any(|header| header.key.trim().eq_ignore_ascii_case(name));
+    let official_anthropic = source.anthropic && endpoint.contains("anthropic.com");
+    if !source.api_key.is_empty() && !crate::relay_headers::has_authorization(&source.headers) && !official_anthropic {
         request = request.bearer_auth(&source.api_key);
     }
-
-    match request.send().await {
-        Ok(response) if response.status().is_success() => match response.json::<Value>().await {
-            Ok(payload) => {
-                let models = unique_strings(parse_model_payload(&payload));
-                safe_source["status"] = json!("ok");
-                safe_source["models"] = json!(models.len());
-                (models, safe_source)
-            }
-            Err(error) => failed_source(safe_source, error.to_string()),
-        },
-        Ok(response) => failed_source(safe_source, format!("HTTP {}", response.status().as_u16())),
-        Err(error) => failed_source(safe_source, error.to_string()),
+    if source.anthropic {
+        // 官方只认 x-api-key；第三方中转常常两种都收，Bearer 已在上面带上。
+        if !source.api_key.is_empty() && !has_header("x-api-key") {
+            request = request.header("x-api-key", &source.api_key);
+        }
+        if !has_header("anthropic-version") {
+            request = request.header("anthropic-version", crate::anthropic_bridge::ANTHROPIC_VERSION);
+        }
     }
+    request = crate::relay_headers::apply_headers(request, &source.headers);
+
+    match tokio::time::timeout(timeout, async move {
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        let body = response.text().await?;
+        Ok::<_, reqwest::Error>((status, body))
+    })
+    .await
+    {
+        Err(_elapsed) => failed_source(
+            safe_source,
+            format!(
+                "上游 {} 秒内未返回模型列表（已超时中断）",
+                timeout.as_secs()
+            ),
+        ),
+        Ok(Err(error)) => failed_source(safe_source, error.to_string()),
+        Ok(Ok((status_code, body))) => interpret_models_response(status_code, &body, safe_source),
+    }
+}
+
+fn interpret_models_response(
+    status_code: u16,
+    body: &str,
+    mut safe_source: Value,
+) -> (Vec<String>, Value) {
+    let payload = serde_json::from_str::<Value>(body.trim()).ok();
+    if !(200..300).contains(&status_code) {
+        return failed_source(
+            safe_source,
+            format!("HTTP {status_code}{}", upstream_error_detail(body)),
+        );
+    }
+    let Some(payload) = payload else {
+        return failed_source(
+            safe_source,
+            format!(
+                "HTTP {status_code} 响应不是有效 JSON{}",
+                upstream_error_detail(body)
+            ),
+        );
+    };
+    // 业务错误信封优先于模型列表判定：网关在错误态下可能回一个占位或部分
+    // 列表（issue 复现：{"code":401,"success":false,"data":[{"id":"..."}]}），
+    // 先看列表会把它当成「获取成功」，用户看到成功但实际令牌已失效。
+    // 反过来不会误伤正常响应——business_error_message 只认 success=false /
+    // code∉{0,200} / error 非空，标准 OpenAI 响应三者都没有。
+    if let Some(message) = business_error_message(&payload) {
+        return failed_source(safe_source, message);
+    }
+    let models = unique_strings(parse_model_payload(&payload));
+    if !models.is_empty() {
+        safe_source["status"] = json!("ok");
+        safe_source["models"] = json!(models.len());
+        return (models, safe_source);
+    }
+    // HTTP 200 且无业务错误信封：维持既有语义，按“网关可达但 0 个模型”处理
+    safe_source["status"] = json!("ok");
+    safe_source["models"] = json!(0);
+    (Vec::new(), safe_source)
 }
 
 fn failed_source(mut source: Value, message: String) -> (Vec<String>, Value) {
@@ -551,6 +789,86 @@ fn failed_source(mut source: Value, message: String) -> (Vec<String>, Value) {
     source["models"] = json!(0);
     source["responses_api"] = responses_api_status("unknown", "", "");
     (Vec::new(), source)
+}
+
+/// 部分网关用 HTTP 200 + 业务信封承载失败。智谱 Codex 专属端点（/api/v1）在 key
+/// 缺失或无效时返回 `{"code":401,"msg":"令牌已过期或验证不正确","success":false}`，
+/// HTTP 状态仍是 200，此前只认状态码，这类失败被解析成“0 个模型”，报错完全不
+/// 指向真因（#2190）。只在模型列表解析为空时才判信封——能取到数据就优先信数据，
+/// 避免误伤非标成功响应。
+fn business_error_message(payload: &Value) -> Option<String> {
+    let object = payload.as_object()?;
+    let envelope_failed = match object.get("success").and_then(Value::as_bool) {
+        Some(success) => !success,
+        None => {
+            numeric_business_code(object.get("code")).is_some_and(|failed| failed)
+                || object.get("error").is_some_and(|error| !error.is_null())
+        }
+    };
+    if !envelope_failed {
+        return None;
+    }
+    message_from_payload(object)
+}
+
+/// `code` 字段是否落在失败档：数字（含字符串数字）且不等于 0/200 视为失败，
+/// 0 是常见的“成功”码，200 是 OpenAI 系成功码。非数字 code 不参与判定。
+fn numeric_business_code(code: Option<&Value>) -> Option<bool> {
+    let code = code?;
+    let code = code.as_i64().or_else(|| {
+        code.as_str()
+            .and_then(|code| code.trim().parse::<i64>().ok())
+    })?;
+    Some(code != 0 && code != 200)
+}
+
+/// 从错误体对象里提取人话原因，兼容 OpenAI 系 `{"error":{"message":...}}`、
+/// 智谱 `{"msg":...}`、xAI `{"error":"..."}` 等形态。
+fn message_from_payload(object: &Map<String, Value>) -> Option<String> {
+    for key in ["error", "msg", "message"] {
+        let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let text = match value {
+            Value::String(text) => Some(text.trim().to_string()),
+            Value::Object(nested) => nested
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|text| text.trim().to_string()),
+            _ => None,
+        };
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// 非 2xx（或非 JSON）时把上游错误体里的原因带进报错（如
+/// `HTTP 401：Incorrect API key provided`）。此前只报 "HTTP 401"，key 失效、
+/// 地址填错、套餐未开通全靠用户猜。
+fn upstream_error_detail(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let detail = serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|payload| message_from_payload(payload.as_object()?))
+        .unwrap_or_else(|| truncate_for_message(trimmed));
+    format!("：{detail}")
+}
+
+/// 报错信息里附带的响应体上限，避免上游回一整页 HTML 时把 UI 提示撑爆。
+fn truncate_for_message(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= MAX_CHARS {
+        return text;
+    }
+    let mut truncated: String = text.chars().take(MAX_CHARS).collect();
+    truncated.push('…');
+    truncated
 }
 
 fn responses_api_status(status: &str, endpoint: &str, message: &str) -> Value {
@@ -564,6 +882,19 @@ fn responses_api_status(status: &str, endpoint: &str, message: &str) -> Value {
 pub async fn fetch_relay_profile_model_ids(
     profile: &RelayProfile,
 ) -> anyhow::Result<(Vec<String>, String)> {
+    // 官方登录 profile 没有 Base URL：带账号 OAuth 凭据读官方模型目录，
+    // 「从上游获取」按钮对官方账号同样可用（issue 讨论场景：聚合成员要填模型列表）。
+    if crate::official_login::member_uses_official_login_transport(profile) {
+        return fetch_official_login_model_ids(profile).await;
+    }
+    if crate::official_login::is_official_login_profile(profile)
+        && profile.base_url.trim().is_empty()
+    {
+        anyhow::bail!(
+            "官方登录供应商「{}」缺少 ChatGPT 登录凭据，请先导入或登录官方账号",
+            profile.name
+        );
+    }
     let source = ModelSource {
         source_id: format!("relay-profile:{}", profile.id),
         source_type: "relay_profile".to_string(),
@@ -577,13 +908,15 @@ pub async fn fetch_relay_profile_model_ids(
         } else {
             profile.upstream_base_url.trim().to_string()
         },
-        api_key: profile.api_key.trim().to_string(),
+        api_key: crate::relay_config::relay_profile_api_key(profile),
+        headers: profile.custom_headers.clone(),
+        anthropic: profile.protocol == crate::settings::RelayProtocol::AnthropicMessages,
     };
     if source.base_url.is_empty() {
         anyhow::bail!("Base URL 不能为空");
     }
     let endpoint = models_endpoint(&source.base_url);
-    let client = crate::http_client::proxied_client(&profile.user_agent)?;
+    let client = crate::http_client::proxied_client_for_relay(&profile.user_agent, &profile)?;
     let (models, status) = fetch_models_from_source(&client, &source).await;
     if models.is_empty() {
         let message = status
@@ -593,6 +926,88 @@ pub async fn fetch_relay_profile_model_ids(
         anyhow::bail!("{message}");
     }
     Ok((models, endpoint))
+}
+
+/// 官方模型目录的客户端版本参数；与 Codex CLI 的取值保持一致。
+pub(crate) const OFFICIAL_MODELS_CLIENT_VERSION: &str = "0.159.0";
+
+/// 官方登录 profile 的模型列表：带账号 OAuth 凭据请求 chatgpt.com 官方目录。
+async fn fetch_official_login_model_ids(
+    profile: &RelayProfile,
+) -> anyhow::Result<(Vec<String>, String)> {
+    let credential = crate::official_login::resolve_official_credential(profile, false).await?;
+    let base = crate::official_login::official_base_url();
+    let endpoint = format!("{}/models", base.trim().trim_end_matches('/'));
+    let client = crate::http_client::proxied_client_for_relay(&profile.user_agent, &profile)?;
+    let mut request = client
+        .get(&endpoint)
+        .query(&[("client_version", OFFICIAL_MODELS_CLIENT_VERSION)])
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", credential.access_token.trim()),
+        )
+        .header("originator", "codex_cli_rs")
+        .header("version", OFFICIAL_MODELS_CLIENT_VERSION)
+        .timeout(MODELS_FETCH_TIMEOUT);
+    if !credential.account_id.trim().is_empty() {
+        request = request.header("chatgpt-account-id", credential.account_id.trim());
+    }
+    let response = request.send().await.context("官方模型列表请求失败")?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!(
+            "获取官方模型列表失败：HTTP {status} {}",
+            truncate_for_message(&text)
+        );
+    }
+    let value: Value = serde_json::from_str(&text).context("官方模型列表解析失败")?;
+    let models = parse_official_model_ids(&value);
+    if models.is_empty() {
+        anyhow::bail!("官方账号没有返回可见模型");
+    }
+    Ok((models, endpoint))
+}
+
+/// 官方目录条目：slug/id/name 均可作为模型 id；`visibility=hide` 与
+/// `visible_in_picker=false` 是官方内部预留位，不进入供应商模型列表。
+pub(crate) fn parse_official_model_ids(value: &Value) -> Vec<String> {
+    let entries = value
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("models").and_then(Value::as_array))
+        .or_else(|| value.get("items").and_then(Value::as_array))
+        .or_else(|| value.as_array());
+    let Some(entries) = entries else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let (id, hidden) = match entry {
+            Value::String(id) => (id.trim().to_string(), false),
+            Value::Object(map) => {
+                let hidden = map
+                    .get("visibility")
+                    .and_then(Value::as_str)
+                    .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
+                    || map.get("visible_in_picker").and_then(Value::as_bool) == Some(false);
+                let id = ["slug", "id", "name"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(Value::as_str))
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                (id, hidden)
+            }
+            _ => (String::new(), false),
+        };
+        if id.is_empty() || hidden || !seen.insert(id.clone()) {
+            continue;
+        }
+        ids.push(id);
+    }
+    ids
 }
 
 fn preferred_responses_api_status(sources: &[Value]) -> Value {
@@ -612,24 +1027,12 @@ fn preferred_responses_api_status(sources: &[Value]) -> Value {
 }
 
 fn models_endpoint(base_url: &str) -> String {
-    let cleaned = safe_url_for_status(base_url)
-        .trim_end_matches('/')
-        .to_string();
+    let cleaned = safe_url_for_status(base_url).trim_end_matches('/').to_string();
     if cleaned.is_empty() {
         return String::new();
     }
-    if cleaned.ends_with("/models") {
-        return cleaned;
-    }
-    // Only append the default `/v1` version prefix when the base URL does not
-    // already carry a version segment. Providers such as Volcano Engine ARK use
-    // a versioned base (e.g. `.../api/coding/v3`), so blindly appending
-    // `/v1/models` produced `.../api/coding/v3/v1/models` and 404'd. This mirrors
-    // the version handling already used by the protocol proxy. See issue #1349.
-    if crate::protocol_proxy::has_version_suffix(&cleaned) {
-        return format!("{cleaned}/models");
-    }
-    format!("{cleaned}/v1/models")
+    // 与实际代理共用规则，保留 /v1beta/openai 等已有路径；清理后的 URL 不含凭据。
+    crate::protocol_proxy::models_url(&cleaned)
 }
 
 fn parse_model_payload(payload: &Value) -> Vec<String> {
@@ -641,9 +1044,15 @@ fn parse_model_payload(payload: &Value) -> Vec<String> {
                     item.as_object().and_then(|object| {
                         ["id", "model", "name"]
                             .iter()
-                            .filter_map(|key| object.get(*key).and_then(Value::as_str))
-                            .find(|value| !value.trim().is_empty())
-                            .map(|value| value.trim().to_string())
+                            .filter_map(|key| {
+                                object
+                                    .get(*key)
+                                    .and_then(Value::as_str)
+                                    .map(|value| model_id_from_field(key, value))
+                                    .filter(|value| !value.is_empty())
+                            })
+                            .next()
+                            .map(ToString::to_string)
                     })
                 })
             })
@@ -662,10 +1071,27 @@ fn parse_model_payload(payload: &Value) -> Vec<String> {
     }
     ["id", "model", "name"]
         .iter()
-        .filter_map(|key| object.get(*key).and_then(Value::as_str))
-        .find(|value| !value.trim().is_empty())
-        .map(|value| vec![value.trim().to_string()])
+        .filter_map(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(|value| model_id_from_field(key, value))
+                .filter(|value| !value.is_empty())
+        })
+        .next()
+        .map(|value| vec![value.to_string()])
         .unwrap_or_default()
+}
+
+/// 模型 ID 字段取值。Gemini 的列表把 ID 放在 `name` 字段且带 `models/` 前缀
+/// （如 `models/gemini-2.5-pro`），剥掉前缀让 ID 与请求体里的 `model` 值一致。
+fn model_id_from_field<'a>(key: &str, value: &'a str) -> &'a str {
+    let value = value.trim();
+    if key == "name" {
+        value.strip_prefix("models/").unwrap_or(value)
+    } else {
+        value
+    }
 }
 
 fn models_from_config_model_catalog_json(
@@ -839,4 +1265,344 @@ fn unquote_toml_string(value: &str) -> String {
         })
         .unwrap_or(value)
         .to_string()
+}
+
+#[cfg(test)]
+mod model_fetch_tests {
+    use super::*;
+
+    #[test]
+    fn relay_profile_model_catalog_keeps_configured_default_after_model_list_sorting() {
+        let profile = RelayProfile {
+            model: "qwen3-coder".into(),
+            model_list: "deepseek-coder\nqwen3-coder\nclaude-compatible".into(),
+            config_contents: "model = \"qwen3-coder\"\n".into(),
+            ..RelayProfile::default()
+        };
+        let home = tempfile::tempdir().unwrap();
+        let catalog = relay_profile_model_catalog_value(home.path(), &profile);
+
+        assert_eq!(catalog["default_model"], "qwen3-coder");
+    }
+
+    #[test]
+    fn model_list_endpoint_preserves_custom_prefixes_and_removes_credentials() {
+        for (base, expected) in [
+            ("https://example.test/v1beta/openai/", "https://example.test/v1beta/openai/models"),
+            ("https://example.test", "https://example.test/v1/models"),
+            ("https://example.test/api/coding/v3", "https://example.test/api/coding/v3/models"),
+            ("https://user:secret@example.test/v1/models?token=secret", "https://example.test/v1/models"),
+        ] { assert_eq!(models_endpoint(base), expected); }
+    }
+
+    #[test]
+    fn relay_model_priority_declaration_reaches_ui_without_enabling_other_models() {
+        let profile = RelayProfile {
+            model: "grok-custom".into(), model_list: "grok-custom\ngrok-unknown\ngpt-5.4".into(),
+            model_metadata: json!({
+                "GROK-CUSTOM[1M]": {"service_tiers":[{"id":"flex"}], "additional_speed_tiers":["slow"], "codex_plus_fast_support":"supported"},
+                "gpt-5.4": {"codex_plus_fast_support":"unsupported"}
+            }).to_string(),
+            ..RelayProfile::default()
+        };
+        let home = tempfile::tempdir().unwrap();
+        let catalog = relay_profile_model_catalog_value(home.path(), &profile);
+        let metadata = &catalog["modelMetadata"];
+        assert_eq!(metadata["grok-custom"]["prioritySupportOverride"], true);
+        assert_eq!(metadata["gpt-5.4"]["prioritySupportOverride"], false);
+        assert_eq!(metadata["grok-custom"]["serviceTiers"][0]["id"], "flex");
+        assert_eq!(metadata["grok-custom"]["serviceTiers"][1]["id"], "priority");
+        assert!(metadata.get("grok-unknown").is_none());
+        assert!(metadata["grok-custom"].get("codex_plus_fast_support").is_none());
+    }
+
+    #[test]
+    fn business_error_message_detects_zhipu_style_envelope() {
+        // 智谱 /api/v1 Codex 专属端点在 key 缺失或无效时返回 HTTP 200 + 业务信封（#2190）
+        let payload = json!({"code": 401, "msg": "令牌已过期或验证不正确", "success": false});
+        assert_eq!(
+            business_error_message(&payload).as_deref(),
+            Some("令牌已过期或验证不正确")
+        );
+    }
+
+    #[test]
+    fn business_error_message_detects_failed_code_without_success_field() {
+        let numeric = json!({"code": 1001, "msg": "鉴权失败"});
+        assert_eq!(
+            business_error_message(&numeric).as_deref(),
+            Some("鉴权失败")
+        );
+
+        let string_code = json!({"code": "401", "message": "invalid token"});
+        assert_eq!(
+            business_error_message(&string_code).as_deref(),
+            Some("invalid token")
+        );
+
+        let error_object = json!({"error": {"code": "1001", "message": "未收到 Authorization"}});
+        assert_eq!(
+            business_error_message(&error_object).as_deref(),
+            Some("未收到 Authorization")
+        );
+    }
+
+    #[test]
+    fn business_error_message_ignores_success_envelopes() {
+        for payload in [
+            json!({"code": 200, "success": true, "data": []}),
+            json!({"code": 0, "msg": "ok", "data": []}),
+            json!({"object": "list", "data": []}),
+            json!({"code": "200", "data": []}),
+            json!([{"id": "glm-5.3"}]),
+        ] {
+            assert_eq!(business_error_message(&payload), None, "{payload}");
+        }
+    }
+
+    #[test]
+    fn interpret_models_response_keeps_ok_semantics_when_200_has_no_models() {
+        let (models, status) =
+            interpret_models_response(200, r#"{"object":"list","data":[]}"#, json!({"id": "t"}));
+        assert!(models.is_empty());
+        assert_eq!(status["status"], "ok");
+        assert_eq!(status["models"], 0);
+    }
+
+    #[test]
+    fn interpret_models_response_surfaces_business_error_on_http_200() {
+        let (models, status) = interpret_models_response(
+            200,
+            r#"{"code":401,"msg":"令牌已过期或验证不正确","success":false}"#,
+            json!({"id": "t"}),
+        );
+        assert!(models.is_empty());
+        assert_eq!(status["status"], "failed");
+        assert_eq!(status["message"], "令牌已过期或验证不正确");
+    }
+
+    #[test]
+    fn interpret_models_response_prefers_business_error_over_a_returned_model_list() {
+        // 网关在错误态下回了一个列表时，错误必须优先——否则用户看到「获取成功」
+        // 但令牌其实已失效，排查会往错误方向走。
+        let (models, status) = interpret_models_response(
+            200,
+            r#"{"code":401,"msg":"令牌已过期","success":false,"data":[{"id":"glm-5.3"}]}"#,
+            json!({"id": "t"}),
+        );
+        assert!(models.is_empty(), "错误态下的列表不应被当作可用模型");
+        assert_eq!(status["status"], "failed");
+        assert_eq!(status["message"], "令牌已过期");
+        assert_eq!(status["models"], 0);
+    }
+
+    #[test]
+    fn interpret_models_response_keeps_normal_lists_working_without_an_envelope() {
+        // 反向保护：标准 OpenAI 响应没有 success/code/error 字段，
+        // 提前检查业务错误不能把它误判成失败。
+        for body in [
+            r#"{"object":"list","data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"}]}"#,
+            r#"{"code":200,"success":true,"data":[{"id":"glm-5.3"}]}"#,
+            r#"{"code":0,"msg":"ok","data":[{"id":"deepseek-v4"}]}"#,
+        ] {
+            let (models, status) = interpret_models_response(200, body, json!({"id": "t"}));
+            assert!(!models.is_empty(), "{body}");
+            assert_eq!(status["status"], "ok", "{body}");
+        }
+    }
+
+    #[test]
+    fn interpret_models_response_appends_upstream_reason_on_http_error() {
+        let (_, status) = interpret_models_response(
+            401,
+            r#"{"error":{"code":"1001","message":"Header中未收到Authorization参数，无法进行身份验证。"}}"#,
+            json!({"id": "t"}),
+        );
+        assert_eq!(status["status"], "failed");
+        let message = status["message"].as_str().unwrap();
+        assert!(message.starts_with("HTTP 401"), "{message}");
+        assert!(
+            message.contains("Header中未收到Authorization参数"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn interpret_models_response_reports_invalid_json_body() {
+        let (_, status) = interpret_models_response(200, "<html>502</html>", json!({"id": "t"}));
+        assert_eq!(status["status"], "failed");
+        let message = status["message"].as_str().unwrap();
+        assert!(message.contains("不是有效 JSON"), "{message}");
+        assert!(message.contains("<html>502</html>"), "{message}");
+    }
+
+    #[test]
+    fn upstream_error_detail_truncates_plain_text_bodies() {
+        assert_eq!(
+            upstream_error_detail("Authentication Fails (governor)"),
+            "：Authentication Fails (governor)"
+        );
+        assert_eq!(upstream_error_detail("   "), "");
+        let long_body = "x".repeat(500);
+        let detail = upstream_error_detail(&long_body);
+        assert!(detail.chars().count() < 260, "{}", detail.chars().count());
+    }
+
+    #[test]
+    fn parse_model_payload_strips_gemini_models_prefix() {
+        let models = parse_model_payload(&json!({
+            "models": [
+                {"name": "models/gemini-2.5-pro", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-2.5-flash"}
+            ]
+        }));
+        assert_eq!(models, vec!["gemini-2.5-pro", "gemini-2.5-flash"]);
+    }
+
+    #[test]
+    fn parse_model_payload_keeps_plain_name_fields() {
+        let models = parse_model_payload(&json!({
+            "models": [{"name": "moonshot-v1"}, {"id": "kimi-k2.6"}]
+        }));
+        assert_eq!(models, vec!["moonshot-v1", "kimi-k2.6"]);
+    }
+
+    #[tokio::test]
+    async fn models_fetch_times_out_when_upstream_never_responds() {
+        // 只 bind 不 accept：TCP 握手由内核完成，send 能成功，读响应体会一直挂起
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let source = ModelSource {
+            source_id: "test".to_string(),
+            source_type: "test".to_string(),
+            name: "Test".to_string(),
+            base_url: format!("http://{address}"),
+            api_key: "key".to_string(),
+            headers: Vec::new(),
+            anthropic: false,
+        };
+        let (_, status) = fetch_models_from_source_with_timeout(
+            &client,
+            &source,
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(status["status"], "failed");
+        assert!(
+            status["message"]
+                .as_str()
+                .unwrap()
+                .contains("未返回模型列表"),
+            "{}",
+            status["message"]
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn official_model_ids_skip_hidden_entries_and_dedupe() {
+        let value = json!({
+            "data": [
+                {"slug": "gpt-6.1-sol"},
+                {"slug": "gpt-reserve", "visibility": "hide"},
+                {"id": "gpt-6-sol"},
+                {"name": "gpt-6-luna", "visible_in_picker": false},
+                "gpt-6.1-sol",
+                {"slug": "   "}
+            ]
+        });
+        assert_eq!(
+            parse_official_model_ids(&value),
+            vec!["gpt-6.1-sol", "gpt-6-sol"]
+        );
+    }
+
+    #[test]
+    fn official_model_ids_accept_models_and_items_shapes() {
+        assert_eq!(
+            parse_official_model_ids(&json!({"models": [{"slug": "a"}]})),
+            vec!["a"]
+        );
+        assert_eq!(
+            parse_official_model_ids(&json!({"items": ["b"]})),
+            vec!["b"]
+        );
+        assert!(parse_official_model_ids(&json!({"other": []})).is_empty());
+    }
+
+    /// 官方登录 profile 的模型拉取：带 OAuth 凭据请求官方 models 端点，跳过隐藏位。
+    struct OfficialBaseUrlEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl OfficialBaseUrlEnvGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("CODEX_PLUS_OFFICIAL_BASE_URL");
+            unsafe {
+                std::env::set_var("CODEX_PLUS_OFFICIAL_BASE_URL", value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for OfficialBaseUrlEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("CODEX_PLUS_OFFICIAL_BASE_URL", value),
+                    None => std::env::remove_var("CODEX_PLUS_OFFICIAL_BASE_URL"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn official_login_profile_fetches_models_with_oauth_headers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let body = r#"{"data":[{"slug":"gpt-6.1-sol"},{"slug":"gpt-reserve","visibility":"hide"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+        let _guard = OfficialBaseUrlEnvGuard::set(&format!("http://{address}/backend-api/codex"));
+
+        let profile = RelayProfile {
+            id: "official".to_string(),
+            name: "官方登录".to_string(),
+            relay_mode: crate::settings::RelayMode::Official,
+            auth_contents: r#"{"auth_mode":"chatgpt","tokens":{"access_token":"official-access","refresh_token":"r","account_id":"acct-1"}}"#.to_string(),
+            ..RelayProfile::default()
+        };
+        let (models, endpoint) = fetch_relay_profile_model_ids(&profile).await.unwrap();
+        assert_eq!(models, vec!["gpt-6.1-sol"]);
+        assert!(endpoint.ends_with("/backend-api/codex/models"), "{endpoint}");
+
+        let request = server.await.unwrap();
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            request.starts_with("GET /backend-api/codex/models?client_version="),
+            "{request}"
+        );
+        assert!(
+            lower.contains("authorization: bearer official-access"),
+            "{request}"
+        );
+        assert!(lower.contains("chatgpt-account-id: acct-1"), "{request}");
+        assert!(lower.contains("originator: codex_cli_rs"), "{request}");
+    }
 }

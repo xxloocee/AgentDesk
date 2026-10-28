@@ -16,6 +16,10 @@ const IMAGE_LIMIT: usize = 10 * 1024 * 1024;
 const LICENSE_LIMIT: usize = 65_536;
 const SIGNATURE_LIMIT: usize = 4096;
 
+// 包导入的 Dream Skin 兼容级别独立于 Codex++ 产品版本和 Codex Desktop build。
+// 与内置上游 v1.5.20 渲染资源及 Safe CSS 桥接同步（issue #2541）；提高前须验证配套能力。
+pub const DREAM_SKIN_PACKAGE_CLIENT_VERSION: &str = "1.5.20";
+
 const ALLOWED_FILES: &[&str] = &[
     "manifest.json",
     "manifest.sig",
@@ -206,6 +210,17 @@ pub fn validate_safe_css(css: &str) -> anyhow::Result<()> {
 /// after validation so community rules cannot smuggle arbitrary declarations in.
 pub fn compile_safe_css(css: &str) -> anyhow::Result<String> {
     let rules = parse_safe_css(css)?;
+    let composer_base_borders = rules
+        .iter()
+        .filter(|rule| rule.part == "composer" && !rule.selector.contains(':'))
+        .flat_map(|rule| rule.declarations.iter().map(|(property, _)| *property))
+        .filter(|property| {
+            property.starts_with("border-")
+                && (property.ends_with("color")
+                    || property.ends_with("width")
+                    || property.ends_with("style"))
+        })
+        .collect::<HashSet<_>>();
     let mut compiled = String::from("@layer dreamskin-community {\n");
     for rule in rules {
         compiled.push_str("  ");
@@ -217,12 +232,28 @@ pub fn compile_safe_css(css: &str) -> anyhow::Result<String> {
             compiled.push_str(": ");
             compiled.push_str(value);
             compiled.push_str(" !important;\n");
+            if rule.part == "composer" && composer_base_borders.contains(property) {
+                compiled.push_str(&format!(
+                    "    --ds-community-composer-{property}: {value} !important;\n"
+                ));
+            }
             if *property == "background-color" && matches!(rule.part, "sidebar" | "main" | "home") {
                 compiled.push_str("    background-image: none !important;\n");
             }
         }
         compiled.push_str("  }\n");
 
+        if rule.part == "home-hero"
+            && let Some((_, value)) = rule
+                .declarations
+                .iter()
+                .find(|(property, _)| *property == "font-size")
+        {
+            compiled.push_str(&format!(
+                "  {}::after {{\n    font-size: {value} !important;\n  }}\n",
+                rule.selector
+            ));
+        }
         if rule.part == "root" {
             let bridged = rule
                 .declarations
@@ -917,10 +948,12 @@ fn validate_manifest(manifest: &DreamSkinPackageManifest, platform: &str) -> any
     if !valid_semver(&manifest.version) || !valid_semver(&manifest.min_client_version) {
         bail!("manifest 版本号无效");
     }
-    if compare_semver(&manifest.min_client_version, "1.5.12").is_gt() {
+    if compare_semver(&manifest.min_client_version, DREAM_SKIN_PACKAGE_CLIENT_VERSION).is_gt() {
         bail!(
-            "主题包需要更新版本的 Dream Skin 协议：{}",
-            manifest.min_client_version
+            "主题包要求 Dream Skin 兼容版本 {}，当前支持 {}（Codex++ {}）。minClientVersion 应填写 Dream Skin 引擎版本，不是 Codex Desktop build；请使用兼容的主题包或联系发布者确认版本标注。",
+            manifest.min_client_version,
+            DREAM_SKIN_PACKAGE_CLIENT_VERSION,
+            crate::version::VERSION
         );
     }
     if manifest.platforms.is_empty()

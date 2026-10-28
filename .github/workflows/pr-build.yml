@@ -26,7 +26,29 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install NSIS
-        run: choco install nsis -y
+        shell: pwsh
+        run: |
+          $makensis = $null
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install nsis -y --no-progress
+            # Chocolatey 可能在下载失败后返回成功，必须实际验证编译器。
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+              "$env:ProgramFiles\NSIS\makensis.exe"
+            )
+            $makensis = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+            if (-not $makensis) {
+              $command = Get-Command makensis.exe -ErrorAction SilentlyContinue
+              if ($command) { $makensis = $command.Source }
+            }
+            if ($makensis) {
+              & $makensis /VERSION
+              if ($LASTEXITCODE -eq 0) { break }
+            }
+            $makensis = $null
+            if ($attempt -lt 3) { Start-Sleep -Seconds (10 * $attempt) }
+          }
+          if (-not $makensis) { throw "NSIS 安装失败或编译器不可用，停止 PR 构建。" }
 
       - name: Install frontend dependencies
         working-directory: apps/codex-plus-manager
@@ -35,6 +57,9 @@ jobs:
       - name: Frontend tests
         working-directory: apps/codex-plus-manager
         run: npm test
+
+      - name: Check native browser inspector bundle
+        run: node scripts/assemble-native-browser-inspector.mjs --check
 
       - name: TypeScript check
         working-directory: apps/codex-plus-manager
@@ -47,7 +72,7 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
-      - name: Build release binaries
+      - name: Build release application
         run: cargo build --release
 
       - name: Stage Windows app files
@@ -55,7 +80,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/windows/app | Out-Null
           Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
-          Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
+          if ((Get-ChildItem dist/windows/app -Filter *.exe).Count -ne 1) { throw "Windows 安装包必须只有一个应用程序。" }
 
       - name: Build Windows installer
         shell: pwsh
@@ -65,13 +90,26 @@ jobs:
           if (-not $version -or $version -eq "main") {
             $version = "0.0.0-${{ github.run_number }}"
           }
-          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-          if (-not (Test-Path $makensis)) {
-            $makensis = "makensis"
+          # NSIS 的 64 位安装目录与 Chocolatey PATH 更新均需要兼容。
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+            "$env:ProgramFiles\NSIS\makensis.exe"
+          )
+          $makensis = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $makensis) {
+            $command = Get-Command makensis.exe -ErrorAction SilentlyContinue
+            if ($command) { $makensis = $command.Source }
+          }
+          if (-not $makensis) {
+            throw "NSIS 编译器未找到，检查 Chocolatey 安装结果。"
           }
           Push-Location scripts/installer/windows
-          & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" AgentDesk.nsi
-          Pop-Location
+          try {
+            & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" AgentDesk.nsi
+            if ($LASTEXITCODE -ne 0) { throw "NSIS 打包失败，退出码 $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
 
       - name: Upload Windows binaries
         uses: actions/upload-artifact@v4
@@ -88,18 +126,10 @@ jobs:
           if-no-files-found: error
 
   macos-dmg:
-    name: macOS DMG (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - arch: arm64
-            runner: macos-14
-            target: aarch64-apple-darwin
+    # PR 构建也出通用包，跟发版产物保持一致，避免只在发版时才暴露问题。
+    # 没有签名密钥，所以这里走 ad-hoc（脚本的默认行为）。
+    name: macOS DMG (universal)
+    runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -112,20 +142,20 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
 
       - name: Install frontend dependencies
         working-directory: apps/codex-plus-manager
         run: npm ci
 
+      - name: Check native browser inspector bundle
+        run: node scripts/assemble-native-browser-inspector.mjs --check
+
       - name: Build frontend
         working-directory: apps/codex-plus-manager
         run: npm run vite:build
 
-      - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Build macOS DMG
+      - name: Build universal macOS DMG
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION#V}"
@@ -133,17 +163,30 @@ jobs:
           if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
             VERSION="0.0.0-${GITHUB_RUN_NUMBER}"
           fi
-          BINARY_DIR="$PWD/target/${{ matrix.target }}/release" bash scripts/installer/macos/package-dmg.sh "$VERSION" "${{ matrix.arch }}"
+          # 未设置 MACOS_SIGNING_IDENTITY，脚本自动退回 ad-hoc 签名。
+          bash scripts/installer/macos/build-universal.sh "$VERSION"
 
       - name: Verify macOS bundle structure
         run: |
           set -euo pipefail
           test -L "dist/macos/stage/Applications"
           test "$(readlink "dist/macos/stage/Applications")" = "/Applications"
+          apps=(dist/macos/stage/*.app)
+          test "${#apps[@]}" = "2"
+          test -f "dist/macos/stage/.hidden"
+          grep -qx "AgentDesk 管理工具.app" "dist/macos/stage/.hidden"
           for app in "dist/macos/stage/AgentDesk.app" "dist/macos/stage/AgentDesk 管理工具.app"; do
             test -f "$app/Contents/Info.plist"
             test -f "$app/Contents/PkgInfo"
             test -x "$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+            if [[ "$app" == *"管理工具.app" ]]; then
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "com.xxloocee.agentdesk.manager"
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")" = "AgentDeskManager"
+            else
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "com.xxloocee.agentdesk"
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")" = "AgentDesk"
+            fi
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CodexPlusUnifiedApp' "$app/Contents/Info.plist")" = "true"
             plutil -lint "$app/Contents/Info.plist" >/dev/null
             codesign -dv "$app" >/dev/null 2>&1
             echo "verified: $app"
@@ -152,6 +195,6 @@ jobs:
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: codex-plus-plus-macos-${{ matrix.arch }}-dmg
+          name: codex-plus-plus-macos-universal-dmg
           path: dist/macos/*.dmg
           if-no-files-found: error

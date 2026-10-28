@@ -62,11 +62,86 @@ fn manager_close_minimizes_to_tray_without_confirmation() {
     assert!(!lib_rs.contains(".dialog()"));
     assert!(!lib_rs.contains("manager://close-requested"));
     assert!(lib_rs.contains("let _ = close_event_window.hide();"));
-    assert!(lib_rs.contains("startup_is_transient()"));
-    assert!(lib_rs.contains("arg == \"--transient\""));
+    assert!(!lib_rs.contains("startup_is_transient()"));
+    // 登录启动可以按已有设置隐藏窗口，手动打开仍保持可见。
+    assert!(lib_rs.contains(".visible(!start_minimized)"));
+    assert!(lib_rs.contains("codex_plus_launcher::shutdown()"));
     assert!(!app_tsx.contains("CloseConfirmDialog"));
     assert!(app_tsx.contains("manager_exit_app"));
     assert!(app_tsx.contains("manager_hide_to_tray"));
+}
+
+#[test]
+fn manager_keeps_a_visible_brand_tray_and_click_menu_when_hiding_the_macos_dock_icon() {
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read manager lib.rs");
+
+    assert!(lib_rs.contains("tauri::ActivationPolicy::Accessory"));
+    assert!(lib_rs.contains("tauri::ActivationPolicy::Regular"));
+    assert!(lib_rs.contains("set_manager_activation_policy(&close_event_app, false)"));
+    assert!(lib_rs.contains("set_manager_activation_policy(app_handle, true)"));
+    assert!(lib_rs.contains("set_manager_activation_policy(&app_handle, false)"));
+    assert!(lib_rs.contains(".icon_as_template(false)"));
+    assert!(lib_rs.contains("tauri::include_image!(\"icons/icon.png\")"));
+    assert!(lib_rs.contains(".show_menu_on_left_click(true)"));
+    assert!(lib_rs.contains(".tooltip(\"AgentDesk\")"));
+}
+
+// 返回 needle 之前文本最近的 #[cfg(...)] 属性。前提是设置语句与其平台门控
+// 属性之间没有插入其他 #[cfg(（install_tray 内的布局保证了这一点）；
+// 若日后重排语句，请同步调整这里的假设或改用语法解析。
+fn nearest_cfg_before<'a>(source: &'a str, needle: &str) -> &'a str {
+    let at = source.find(needle).expect(needle);
+    let before = &source[..at];
+    let start = before
+        .rfind("#[cfg(")
+        .expect("cfg attribute before the setting");
+    let end = before[start..]
+        .find(']')
+        .map(|offset| start + offset)
+        .expect("cfg attribute end");
+    &before[start..=end]
+}
+
+// issue #2676：Windows 左键单击直接唤起主窗口（菜单只留给右键），
+// 非 Windows 平台保持「点击弹出菜单」的原有行为不变。
+#[test]
+fn windows_tray_left_click_restores_the_window_and_keeps_the_menu_for_right_click() {
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read manager lib.rs");
+
+    assert_eq!(
+        nearest_cfg_before(&lib_rs, ".show_menu_on_left_click(false)"),
+        "#[cfg(windows)]"
+    );
+    assert_eq!(
+        nearest_cfg_before(&lib_rs, ".show_menu_on_left_click(true)"),
+        "#[cfg(not(windows))]"
+    );
+    // 左键单击唤窗走统一的事件判定，不绕过 show_main_window。
+    assert!(lib_rs.contains("tray_event_shows_main_window(&event)"));
+    // CI 只在 Windows 跑 cargo test，谓词的平台门控靠这里文本守护：
+    // 去掉 cfg!(windows) && 会让非 Windows 平台的左键单击也唤窗（#2676 回归）。
+    assert!(lib_rs.contains("cfg!(windows) && left_click_up"));
+}
+
+#[test]
+fn manager_reopens_hidden_window_when_macos_dock_requests_reopen() {
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read manager lib.rs");
+
+    assert!(lib_rs.contains("tauri::RunEvent::Reopen"));
+    assert!(lib_rs.contains("show_main_window(app_handle);"));
+}
+
+#[test]
+fn manager_second_instance_activates_existing_macos_bundle() {
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read manager lib.rs");
+
+    assert!(lib_rs.contains("native_application_bundle_from_executable"));
+    assert!(!lib_rs.contains("codex_plus_core::install::MANAGER_BUNDLE_ID"));
+    assert!(lib_rs.contains("std::process::Command::new(\"/usr/bin/open\")"));
 }
 
 #[test]
@@ -81,17 +156,21 @@ fn manager_queues_codexplusplus_provider_urls_for_confirmation_on_startup() {
 }
 
 #[test]
-fn launcher_binary_embeds_codex_icon_resource() {
+fn only_the_gui_binary_is_built_with_the_codex_icon() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let launcher_build = manifest_dir
+    let launcher_manifest = manifest_dir
         .parent()
         .and_then(std::path::Path::parent)
         .unwrap()
-        .join("codex-plus-launcher/build.rs");
-    let build_rs = std::fs::read_to_string(&launcher_build).expect("read launcher build.rs");
-
-    assert!(build_rs.contains("WindowsResource"));
-    assert!(build_rs.contains("icons/icon.ico"));
+        .join("codex-plus-launcher/Cargo.toml");
+    let launcher = std::fs::read_to_string(&launcher_manifest).expect("read runtime manifest");
+    let manager = std::fs::read_to_string(manifest_dir.join("Cargo.toml")).unwrap();
+    let config = std::fs::read_to_string(manifest_dir.join("tauri.conf.json")).unwrap();
+    assert!(launcher.contains("autobins = false"));
+    assert!(launcher.contains("build = false"));
+    assert!(!launcher.contains("[[bin]]"));
+    assert!(manager.contains("name = \"codex-plus-plus\""));
+    assert!(config.contains("icons/icon.ico"));
 }
 
 #[test]
@@ -144,18 +223,25 @@ fn windows_entrypoints_register_codexplusplus_url_protocol() {
 }
 
 #[test]
-fn manager_launch_button_spawns_silent_launcher_binary() {
+fn manager_launch_button_uses_the_embedded_runtime() {
     let commands_rs =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
             .expect("read manager commands.rs");
 
-    assert!(commands_rs.contains("SILENT_BINARY"));
-    assert!(commands_rs.contains("std::process::Command::new"));
-    assert!(!commands_rs.contains("launch_and_inject_with_hooks(options"));
+    let body = commands_rs
+        .split("fn start_embedded_launcher(")
+        .nth(1)
+        .unwrap()
+        .split("pub fn start_weixin_connect_from_saved_settings")
+        .next()
+        .unwrap();
+    assert!(body.contains("codex_plus_launcher::start"));
+    assert!(!body.contains("spawn_companion"));
+    assert!(!body.contains("Command::new"));
 }
 
 #[test]
-fn macos_packager_hides_silent_launcher_but_not_manager() {
+fn macos_packager_builds_one_visible_native_gui_with_legacy_update_shim() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let packager = manifest_dir
         .parent()
@@ -170,15 +256,19 @@ fn macos_packager_hides_silent_launcher_but_not_manager() {
     assert!(script.contains("BINARY_DIR=\"${BINARY_DIR:-$ROOT/target/release}\""));
     assert!(script.contains("AgentDesk-${VERSION}-macos-${ARCH}.dmg"));
     assert!(script.contains(
-        "create_app \"AgentDesk\" \"AgentDesk\" \"$BINARY_DIR/codex-plus-plus\" \"com.xxloocee.agentdesk\" \"true\""
+        "create_app \"AgentDesk\" \"AgentDesk\" \"$BINARY_DIR/codex-plus-plus\" \"com.xxloocee.agentdesk\" \"false\""
     ));
     assert!(script.contains(
-        "create_app \"AgentDesk 管理工具\" \"AgentDeskManager\" \"$BINARY_DIR/codex-plus-plus-manager\" \"com.xxloocee.agentdesk.manager\" \"false\""
+        "create_app \"AgentDesk 管理工具\" \"AgentDeskManager\" \"$BINARY_DIR/codex-plus-legacy-shim\" \"com.xxloocee.agentdesk.manager\" \"true\""
     ));
+    assert!(script.contains("printf '%s\\n' \"AgentDesk 管理工具.app\" > \"$STAGE/.hidden\""));
+    assert!(script.contains("chflags hidden \"$STAGE/AgentDesk 管理工具.app\""));
+    assert!(script.contains("set visible of item \"AgentDesk 管理工具.app\" to false"));
+    assert!(script.contains("<key>CodexPlusUnifiedApp</key>"));
 }
 
 #[test]
-fn github_release_workflow_builds_separate_macos_x64_and_arm64_dmgs() {
+fn github_release_workflow_builds_one_universal_macos_dmg() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = manifest_dir
         .parent()
@@ -188,12 +278,15 @@ fn github_release_workflow_builds_separate_macos_x64_and_arm64_dmgs() {
         .join(".github/workflows/release-assets.yml");
     let workflow = std::fs::read_to_string(&workflow).expect("read release assets workflow");
 
-    assert!(workflow.contains("macos-15-intel"));
-    assert!(workflow.contains("x86_64-apple-darwin"));
+    // 通用包：单个 job 在两个 target 上各编一遍，由 build-universal.sh
+    // 用 lipo 合并。两个架构的 std 都要装。
     assert!(workflow.contains("macos-14"));
-    assert!(workflow.contains("aarch64-apple-darwin"));
-    assert!(workflow.contains("package-dmg.sh \"$VERSION\" \"${{ matrix.arch }}\""));
-    assert!(workflow.contains("target/${{ matrix.target }}/release"));
+    assert!(workflow.contains("x86_64-apple-darwin,aarch64-apple-darwin"));
+    assert!(workflow.contains("build-universal.sh \"$VERSION\""));
+
+    // 分架构的 matrix 形态不应再出现，否则会回到「用户自己挑架构」的老问题。
+    assert!(!workflow.contains("matrix.arch"));
+    assert!(!workflow.contains("macos-15-intel"));
 }
 
 #[test]
@@ -228,11 +321,11 @@ fn relay_settings_keeps_profile_config_and_auth_files_isolated() {
     assert!(app_tsx.contains("function relayProfileSwitchCommand"));
     assert!(app_tsx.contains("return \"apply_pure_api_injection\""));
     assert!(app_tsx.contains("return \"apply_relay_injection\""));
-    assert!(app_tsx.contains("const createNewAggregateProfile = () =>"));
-    assert!(app_tsx.contains("onClick={createNewAggregateProfile}"));
+    assert!(app_tsx.contains("const createNewAggregateProfile = (mode: AggregateMode)"));
+    assert!(app_tsx.contains("onClick={() => createNewAggregateProfile("));
     assert!(app_tsx.contains("已打开聚合供应商详情"));
     assert!(app_tsx.contains(
-        "buildRelayConfigToml(profile, { includeBearerToken: false, requiresOpenAiAuth: true })"
+        "buildRelayConfigToml(profile, { includeBearerToken: !profile.noAuth, requiresOpenAiAuth: false })"
     ));
     assert!(
         app_tsx.contains(
@@ -253,7 +346,7 @@ fn relay_context_management_is_global_not_supplier_scoped() {
     let styles = std::fs::read_to_string(&styles).expect("read manager styles.css");
 
     assert!(app_tsx.contains("作为全局配置独立管理"));
-    assert!(app_tsx.contains("label: t(\"MCP&插件\")") || app_tsx.contains("label: \"MCP&插件\""));
+    assert!(app_tsx.contains("label: \"MCP\"") || app_tsx.contains("label: t(\"MCP\")"));
     assert!(
         app_tsx.contains("title={t(\"Codex MCP&插件\")}")
             || app_tsx.contains("title=\"Codex MCP&插件\"")
@@ -389,6 +482,10 @@ fn manager_update_install_keeps_visible_progress_bar() {
     assert!(app_tsx.contains("安装包更新进度"));
     assert!(app_tsx.contains("completedTitle={t(\"上次更新结果\")}"));
     assert!(app_tsx.contains("progress={updateInstallProgress}"));
-    assert!(app_tsx.contains("current.percent + 0.2"));
-    assert!(app_tsx.contains("下载或启动耗时较长"));
+    assert!(app_tsx.contains("listen<UpdateProgressEvent>(\"update-progress\""));
+    assert!(app_tsx.contains("data-indeterminate"));
+    assert!(app_tsx.contains("正在写入安装包并准备安装"));
+    assert!(app_tsx.contains("正在启动安装器"));
+    assert!(!app_tsx.contains("current.percent + 0.2"));
+    assert!(!app_tsx.contains("下载或启动耗时较长"));
 }

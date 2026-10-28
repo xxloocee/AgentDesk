@@ -95,6 +95,24 @@ const trackedFiles = [
   "tools/codex-wechat/README.md",
 ];
 
+// 新上游将注入脚本拆为分片，必须同时处理唯一来源和生成物。
+const rendererManifestPath = path.join(root, "assets/inject/renderer-inject/manifest.json");
+const rendererFragments = fs.existsSync(rendererManifestPath)
+  ? JSON.parse(fs.readFileSync(rendererManifestPath, "utf8")).fragments
+    .map(({ name }) => `assets/inject/renderer-inject/${name}`)
+  : [];
+trackedFiles.push(...rendererFragments, "apps/codex-plus-manager/src/gateway-model.ts",
+  "apps/codex-plus-manager/src/GatewayProviders.tsx", "site/index.html", "site/en.html",
+  "site/js/main.js", "site/scripts/build-data.mjs", "site/data/sponsors.json",
+  "apps/codex-plus-manager/src/gateway-model.test.ts");
+if (rendererFragments.length) trackedFiles.push("assets/inject/renderer-inject/manifest.json");
+const previewAssetsDir = path.join(root, "site/manager-preview/assets");
+const previewBundles = fs.existsSync(previewAssetsDir)
+  ? fs.readdirSync(previewAssetsDir).filter((name) => /^App-.*\.js$/.test(name))
+    .map((name) => `site/manager-preview/assets/${name}`)
+  : [];
+trackedFiles.push(...previewBundles);
+
 // 上游广告与社群图片没有运行时用途。使用显式白名单删除，避免通配符误伤二狗子封面或功能截图。
 const obsoleteAssets = [
   "assets/images/rawchat-sponsor.jpg",
@@ -302,9 +320,18 @@ function forceLegacyConstants(text) {
 }
 
 function brandReplace(text) {
+  const marketSources = [config.scriptMarket.repositoryUrl, config.scriptMarket.indexUrl,
+    config.dreamSkinSources.marketIndexUrl, config.dreamSkinSources.marketRawBaseUrl,
+    config.dreamSkinSources.marketRepositoryUrl].filter(Boolean);
+  for (const [index, source] of marketSources.entries()) {
+    text = text.split(source).join(`__FUNCTIONAL_MARKET_${index}__`);
+  }
   const protectedBlock = protectLegacyLiterals(text);
   let next = replaceAll(protectedBlock.text, replacers);
   next = restoreLegacyLiterals(next, protectedBlock.placeholders);
+  for (const [index, source] of marketSources.entries()) {
+    next = next.split(`__FUNCTIONAL_MARKET_${index}__`).join(source);
+  }
   return forceLegacyConstants(next);
 }
 
@@ -360,6 +387,7 @@ function patchReadme(text, language) {
   // 纯净版直接删除赞助 / 社群 / 友情链接段落，不保留占位说明
   for (const heading of [
     "赞助商",
+    "感谢赞助商",
     "推荐内容",
     "交流与支持",
     "友情链接",
@@ -447,7 +475,7 @@ function patchPathsRs(text) {
       /const APP_STATE_DIR: &str = "[^"]+";/,
       `const APP_STATE_DIR: &str = "${config.brand.stateDir}";`
     )
-    .replace(/\.codex-session-delete\//g, `${config.brand.stateDir}/`);
+    .replace(/\.codex-session-delete/g, config.brand.stateDir);
 }
 
 function patchRendererInject(text) {
@@ -693,7 +721,12 @@ function patchManagerApp(text) {
     .replace(/https:\/\/jojocode\.com\/?/g, config.officialRelay.homeUrl)
     .replace(/打开 JOJO Code/g, "打开二狗子")
     .replace(/打开官方中转/g, "打开二狗子");
-  return next;
+  return next
+    .replace(/从 AgentDesk-Themes 仓库加载可安装主题。/g, "从皮肤市场加载可安装主题。")
+    .replace(/<Button onClick=\{\(\) => void actions\.openExternalUrl\("https:\/\/discord\.gg\/y96kX7A76v"\)\}[^>]*>[\s\S]*?<\/Button>/g, "")
+    .replace(/赞助商推荐/g, "中转推荐")
+    .replace(/普通推荐/g, "其他推荐")
+    .replace(/^[\t ]+$/gm, "");
 }
 
 function patchPresets(text) {
@@ -725,6 +758,11 @@ function patchPresets(text) {
 }
 
 function patchWindowsInstaller(text) {
+  if (text.includes('--codex-plus-uninstall-cleanup')) {
+    if (text.includes('; AgentDesk protocol ownership guard')) return text;
+    return text.replace(/  DeleteRegKey HKCU "Software\\Classes\\(codexplusplus|dreamskin)"/g,
+      (_, protocol) => `  ; AgentDesk protocol ownership guard\n  ReadRegStr $0 HKCU "Software\\Classes\\${protocol}\\shell\\open\\command" ""\n  StrCpy $1 "$\\"$INSTDIR\\codex-plus-plus.exe$\\" $\\"%1$\\""\n  StrCmp $0 $1 0 +2\n  DeleteRegKey HKCU "Software\\Classes\\${protocol}"`);
+  }
   let next = text.replace(/(^\s*Delete "[^"]*AgentDesk 管理工具\.lnk"\n)\1/gm, "$1");
   const protocolCleanup = String.raw`  ReadRegStr $0 HKCU "Software\Classes\codexplusplus\shell\open\command" ""
   StrCpy $1 "$\"$INSTDIR\codex-plus-plus-manager.exe$\" $\"%1$\""
@@ -743,7 +781,6 @@ function patchWindowsInstaller(text) {
 
 function patchWindowsInstallRs(text) {
   let next = text
-    .replace(/\nconst LEGACY_UNINSTALL_SUBKEYS?:[\s\S]*?;\n/, "\n")
     .replace(/\n\s*pub legacy_uninstall_key: String,/, "")
     .replace(/\n\s*(?:\/\/[^\n]*\n\s*)?legacy_uninstall_key:\s*"[^"]*"\.to_string\(\),/, "")
     .replace(
@@ -788,7 +825,7 @@ fn url_protocol_command_owned_by(manager_path: &str, values: &[(String, Option<S
 }
 
 #[cfg(test)]
-mod tests {
+mod protocol_ownership_tests {
     use super::url_protocol_command_owned_by;
 
     #[test]
@@ -816,6 +853,15 @@ mod tests {
 `;
     next = next.replace("fn default_icon_path()", `${ownershipHelpers}fn default_icon_path()`);
   }
+  next = next
+    .replace('unregister_url_protocol_if_owned(&plan.manager_path)?;', 'unregister_url_protocol_if_owned(URL_PROTOCOL_SUBKEY, &plan.manager_path)?;')
+    .replace(/\n\s*let _ = crate::windows_integration::delete_current_user_key\(&format!\(\s*r"\{DREAM_SKIN_URL_PROTOCOL_SUBKEY\}\\shell\\open\\command"\s*\)\);[\s\S]*?\n\s*let _ = crate::windows_integration::delete_current_user_key\(DREAM_SKIN_URL_PROTOCOL_SUBKEY\);/,
+      '\n    unregister_url_protocol_if_owned(DREAM_SKIN_URL_PROTOCOL_SUBKEY, &plan.manager_path)?;')
+    .replace('fn unregister_url_protocol_if_owned(manager_path: &str)', 'fn unregister_url_protocol_if_owned(protocol_subkey: &str, manager_path: &str)')
+    .replace('let command_subkey = format!(r"{URL_PROTOCOL_SUBKEY}\\shell\\open\\command");', 'let command_subkey = format!(r"{protocol_subkey}\\shell\\open\\command");')
+    .replace('format!(r"{URL_PROTOCOL_SUBKEY}\\shell\\open"),', 'format!(r"{protocol_subkey}\\shell\\open"),')
+    .replace('format!(r"{URL_PROTOCOL_SUBKEY}\\shell"),', 'format!(r"{protocol_subkey}\\shell"),')
+    .replace('URL_PROTOCOL_SUBKEY.to_string(),', 'protocol_subkey.to_string(),');
   return next;
 }
 
@@ -834,7 +880,8 @@ function patchBugReport(text) {
 }
 
 function patchWorkflow(text) {
-  return text.replace(/npm install --package-lock=false/g, "npm ci");
+  return text.replace(/npm install --package-lock=false/g, "npm ci")
+    .replace(/CodexPlusPlus\.nsi/g, "AgentDesk.nsi");
 }
 
 function patchDocsIndex(text) {
@@ -967,6 +1014,7 @@ function patchDreamSkinTestTs(text) {
       '    assert.equal(theme.colors!.accent, "#E25563");\n    assert.equal(theme.promoTitle, undefined);\n    assert.equal(theme.promoSub, undefined);\n    assert.equal(theme.promoUrl, undefined);'
     );
   }
+  if (config.dreamSkinSources.enabled) return next;
   return next.replace(
     /  it\("(?:separates the remote marketplace from local theme editing|keeps privateized remote asset sources dormant)"[\s\S]*?\n  \}\);/,
     String.raw`  it("keeps privateized remote asset sources dormant", async () => {
@@ -1053,7 +1101,8 @@ function patchI18nEn(text) {
     .replace(/^\s*"其他推荐":\s*"[^"]*",\r?\n/m, "")
     .replace(/^\s*"暂无其他推荐。":\s*"[^"]*",\r?\n/m, "")
     .replace(/重启 AgentDesk/g, "重启 Codex")
-    .replace(/Restart AgentDesk/g, "Restart Codex");
+    .replace(/Restart AgentDesk/g, "Restart Codex")
+    .replace(/普通推荐/g, "其他推荐");
 }
 
 function patchManagerCommands(text) {
@@ -1061,7 +1110,9 @@ function patchManagerCommands(text) {
 }
 
 function patchRendererInjectTest(text) {
-  let next = text.split(String.raw`Codex\+\+`).join("AgentDesk");
+  let next = text.split(String.raw`Codex\+\+`).join("AgentDesk")
+    .replaceAll('"  function cacheBustCodexPlusAdUrl("', '"  async function fetchCodexPlusAds()"')
+    .replaceAll("../../../docs/images/sponsor-runapi.png", "../../../docs/images/sponsor-ergouzi.png");
   if (!config.sessionShare.enabled) {
     next = next.replace(
       'it("adds an encrypted session sharing button to the active Codex conversation", async () => {',
@@ -1095,10 +1146,8 @@ function patchI18nKeys(text) {
     "Telegram",
     "交流群",
     "赞赏",
-    "AgentDesk-Themes",
-    "CodexPlusPlus-Themes",
-    "CodexPlusPlusScriptMarket",
-    "DreamSkin.cc",
+    ...(!config.dreamSkinSources.enabled ? ["AgentDesk-Themes", "CodexPlusPlus-Themes", "DreamSkin.cc"] : []),
+    ...(!config.scriptMarket.enabled ? ["CodexPlusPlusScriptMarket"] : []),
   ];
   for (const key of ["plain", "template"]) {
     if (!Array.isArray(payload[key])) continue;
@@ -1151,6 +1200,22 @@ function patchAdsTest(text) {
 }
 
 function transform(relativePath, text) {
+  if (previewBundles.includes(relativePath)) {
+    return text.replace(/,\{id:"jojocode(?:-max)?",[^{}]*\}/g, "")
+      .replace(/,promo(?:Title|Sub|Url):"[^"]*"/g, "")
+      .replace(/https:\/\/cloud\.siliconflow\.cn\/i\/[^" ]+/g, "https://cloud.siliconflow.cn")
+      .replace(/,e\.jsxs\(T,\{onClick:\(\)=>void o\.openExternalUrl\("https:\/\/(?:discord\.gg\/y96kX7A76v|t\.me\/CodexPlusPlus)"\),variant:"secondary",children:\[e\.jsx\(cs,\{className:"h-4 w-4"\}\),"(?:Discord|Telegram)"\]\}\)/g, "");
+  }
+  if (relativePath === "assets/inject/renderer-inject/manifest.json") {
+    const manifest = JSON.parse(text);
+    for (const fragment of manifest.fragments) {
+      fragment.lines = patchRendererFragment(read(`assets/inject/renderer-inject/${fragment.name}`)).split("\n").length - 1;
+    }
+    return `${JSON.stringify(manifest, null, 2)}\n`;
+  }
+  if (rendererFragments.includes(relativePath)) {
+    return patchRendererFragment(text);
+  }
   let next = brandReplaceFiles.has(relativePath) ? brandReplace(text) : text;
   if (bundledSkinPackThemePaths.has(relativePath)) {
     next = patchBundledDreamSkinTheme(next);
@@ -1170,7 +1235,17 @@ function transform(relativePath, text) {
       next = patchReadme(next, "en");
       break;
     case "docs/index.html":
-      next = patchDocsIndex(next);
+      next = patchPublicAds(patchDocsIndex(next));
+      break;
+    case "docs/site.js":
+    case "site/index.html":
+    case "site/en.html":
+    case "site/js/main.js":
+    case "site/scripts/build-data.mjs":
+      next = patchPublicAds(next);
+      break;
+    case "site/data/sponsors.json":
+      next = '{"fetched_at":null,"source":null,"topAd":null,"ads":[]}\n';
       break;
     case "docs/changelog.html":
       next = patchDocsChangelog(next);
@@ -1187,7 +1262,7 @@ function transform(relativePath, text) {
       next = removeRepositoryLineage(next);
       break;
     case "assets/inject/renderer-inject.js":
-      next = patchRendererInject(next);
+      next = rendererFragments.length ? patchRendererFragment(text) : patchRendererInject(next);
       break;
     case "assets/inject/upstream/cidala-tiger/macos/theme.json":
     case "assets/inject/upstream/dream-skin/macos/theme.json":
@@ -1208,6 +1283,12 @@ function transform(relativePath, text) {
       break;
     case "apps/codex-plus-manager/src/presets.ts":
       next = patchPresets(next);
+      break;
+    case "apps/codex-plus-manager/src/gateway-model.ts":
+      next = patchGatewayPresets(next);
+      break;
+    case "apps/codex-plus-manager/src/gateway-model.test.ts":
+      next = patchGatewayPresetTest(next);
       break;
     case "apps/codex-plus-manager/src/renderer-inject.test.ts":
       next = patchRendererInjectTest(next);
@@ -1238,6 +1319,9 @@ function transform(relativePath, text) {
       break;
     case "crates/codex-plus-core/src/settings.rs":
       next = patchSettingsRs(next);
+      break;
+    case "crates/codex-plus-core/src/launcher.rs":
+      next = next.replace(/重启 AgentDesk/g, "重启 Codex");
       break;
     case "crates/codex-plus-core/src/paths.rs":
       next = patchPathsRs(next);
@@ -1278,6 +1362,43 @@ function transform(relativePath, text) {
   return next;
 }
 
+function patchRendererFragment(text) {
+  return brandReplace(text)
+    .replace(/\n\s*<div class="codex-plus-row">\s*<div><div class="codex-plus-row-title">(?:Discord 社区|Telegram 频道)<\/div>[\s\S]*?<button[^>]*data-codex-plus-(?:discord|telegram)="true"[^>]*>[\s\S]*?<\/button>\s*<\/div>/g, "")
+    .replace(/\n\s*if \(target\?\.closest\("\[data-codex-plus-(?:discord|telegram)\]"\)\) \{[\s\S]*?\n\s*\}/g, "")
+    .replace(/<br>(?:Discord|Telegram): <a[^>]*>[\s\S]*?<\/a>/g, "")
+    .replace(/\n  function cacheBustCodexPlusAdUrl\(url, version\) \{[\s\S]*?(?=\n  async function fetchCodexPlusAds\(\))/, "")
+    .replace(/\n\s*if \(!codexPlusAds\.length\) codexPlusAds = normalizeCodexPlusAds\(await directFetchCodexPlusAds\(\)\);/, "")
+    .replace(/\n\s*installSessionShareImportListener\(\);/g, config.sessionShare.enabled ? "$&" : "")
+    .replace(/\n\s*installSessionShareButton\(\);/g, config.sessionShare.enabled ? "$&" : "");
+}
+
+function patchPublicAds(text) {
+  return text
+    .replace(/\n\s*<div class="sponsors"[\s\S]*?<\/div>\s*(?=<\/div>\s*<\/section>)/g, "")
+    .replace(/\n\s*<div class="sponsor-block">[\s\S]*?<\/div>\s*(?=<\/div>|<\/section>)/g, "")
+    .replace(/((?:const|var) (?:sponsorSources|AD_SOURCES|sources|REMOTE) = )\[[\s\S]*?\];/g,
+      (match, declaration) => /ads\.codexpp\.cc|Ad-List/.test(match) ? `${declaration}[];` : match)
+    .replace(/https:\/\/codexpp\.cc/g, config.website.baseUrl)
+    .replace(/<a[^>]*href="https:\/\/t\.me\/CodexPlusPlus"[^>]*>[\s\S]*?<\/a>/g, "")
+    .replace(/^[\t ]+$/gm, "");
+}
+
+function patchGatewayPresets(text) {
+  // 不按第三方类别过滤，只移除广告专用预设；保留正常兼容服务。
+  return text.replace(/(export const SPONSORS: Array<\{ id: string; expiresAt: string \}> = )\[[\s\S]*?\];/, "$1[];");
+}
+
+function patchGatewayPresetTest(text) {
+  return text
+    .replace('test("赞助商单独一组放在「添加供应商」最前面，不再混在中转里"', 'test("移除广告分组并保留正常第三方中转预设"')
+    .replace('assert.deepEqual(sponsors, ["jojocode-max", "runapi", "apikeyfun"]);', 'assert.deepEqual(sponsors, []);\n  assert.ok(!presets.some((preset) => /jojo/i.test(preset.key)));')
+    .replace('assert.ok(!keys(new Date(2026, 10, 8)).includes("runapi"));', 'assert.ok(keys(new Date(2026, 10, 8)).includes("runapi"));')
+    .replace('assert.deepEqual(activeSponsorIds(new Date(2026, 10, 23)), ["jojocode-max"]);', 'assert.deepEqual(activeSponsorIds(new Date(2026, 10, 23)), []);')
+    .replace('// 到期日当天仍显示，第二天起从目录里去掉。', '// 普通中转配置不再随着广告合作到期而消失。')
+    .replace('assert.equal(presets[0].section, "sponsor");', 'assert.notEqual(presets[0].section, "sponsor");');
+}
+
 function auditEntries(entries) {
   const needles = [
     "Codex++",
@@ -1304,9 +1425,7 @@ function auditEntries(entries) {
     "docs.qq.com/doc/DQ2VOanZTTFZJcUpZ",
     "CodexPlusPlusScriptMarket",
     "AgentDesk-Themes",
-    "DreamSkin.cc",
-    "dreamskin.cc",
-    "codex-theme-gallery.howardhua.chatgpt.site",
+    ...(!config.dreamSkinSources.enabled ? ["DreamSkin.cc", "dreamskin.cc", "codex-theme-gallery.howardhua.chatgpt.site"] : []),
     "重启 AgentDesk",
     "restarting AgentDesk",
   ];
@@ -1367,10 +1486,7 @@ function auditEntries(entries) {
     "apps/codex-plus-manager/src/App.tsx": [
       'className="session-share-import"',
       ...(config.scriptMarket.enabled ? [] : ["await refreshScriptMarket(true);"]),
-      "await refreshDreamSkinMarket(true);",
-      "await refreshDreamSkinCommunity(true);",
-      'aria-selected={themeView === "community"}',
-      "pendingDreamSkinCommunity ? (",
+      ...(!config.dreamSkinSources.enabled ? ["await refreshDreamSkinMarket(true);", "await refreshDreamSkinCommunity(true);", 'aria-selected={themeView === "community"}', "pendingDreamSkinCommunity ? ("] : []),
       "赞助商推荐",
       "普通推荐",
       "暂无赞助商推荐",
@@ -1391,10 +1507,27 @@ function auditEntries(entries) {
   };
   for (const { actualPath, contents } of entries) {
     let auditableContents = contents;
+    for (const source of [config.scriptMarket.repositoryUrl, config.scriptMarket.indexUrl,
+      config.dreamSkinSources.marketIndexUrl, config.dreamSkinSources.marketRawBaseUrl,
+      config.dreamSkinSources.marketRepositoryUrl]) {
+      if (source) auditableContents = auditableContents.split(source).join("");
+    }
     for (const fragment of allowedFragmentsByFile[actualPath] ?? []) {
       auditableContents = auditableContents.split(fragment).join("");
     }
     for (const needle of needles) {
+      // 兼容协议、历史测试样本与注释中的上游名称不是广告。
+      if (["Codex++", "CodexPlusPlus", "BigPizzaV3"].includes(needle)
+        && (rendererFragments.includes(actualPath) || actualPath === "assets/inject/renderer-inject.js"
+          || actualPath === "apps/codex-plus-manager/src/GatewayProviders.tsx"
+          || actualPath === "crates/codex-plus-core/src/script_market.rs"
+          || actualPath === "crates/codex-plus-core/src/settings.rs"
+          || actualPath === "crates/codex-plus-core/src/update.rs"
+          || actualPath === "assets/inject/renderer-inject/manifest.json"
+          || actualPath.startsWith("site/"))) continue;
+      if (["share.codexpp.cc", "codexpp-share.pages.dev"].includes(needle)
+        && rendererFragments.includes(actualPath)) continue;
+      if (needle === "AgentDesk-Themes" && config.dreamSkinSources.enabled) continue;
       if (auditableContents.includes(needle)) hits.push({ file: actualPath, needle });
     }
     for (const needle of forbiddenFragmentsByFile[actualPath] ?? []) {

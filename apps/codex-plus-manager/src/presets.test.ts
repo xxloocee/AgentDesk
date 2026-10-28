@@ -40,4 +40,16 @@ test("DeepSeek preset uses the official Responses integration", () => {
   assert.equal(preset.model, "deepseek-v4-flash");
   assert.deepEqual(preset.modelList, ["deepseek-v4-flash", "deepseek-v4-pro"]);
 });
+
+// GrooRoute 赞助已于 2026-10-15 到期：预设与推广链接一并下线。
+test("expired GrooRoute sponsor preset is removed", () => {
+  assert.equal(PRESETS.some((candidate) => candidate.id === "grooroute"), false);
+});
+
+test("RunAPI preset uses the current v1 Base URL", () => {
+  const preset = PRESETS.find((candidate) => candidate.id === "runapi");
+  assert.ok(preset);
+  assert.equal(preset.baseUrl, "https://runapi.host/v1");
+  assert.equal(preset.protocol, "responses");
+});
 });

@@ -12,6 +12,8 @@ async-trait = "0.1"
 base64.workspace = true
 directories.workspace = true
 futures-util = "0.3"
+http.workspace = true
+httpdate.workspace = true
 fs2.workspace = true
 reqwest.workspace = true
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -19,6 +21,8 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sha1 = "0.10"
+sherpa-onnx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "sync"] }
 tokio-tungstenite.workspace = true
@@ -28,9 +32,19 @@ uuid.workspace = true
 zip.workspace = true
 zstd.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# 窗口取流（ScreenCaptureKit）——仅 macOS 有这套框架
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-core-graphics = "0.3"
+objc2-foundation = "0.3"
+objc2-screen-capture-kit = "0.3"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
   "Win32_Foundation",
+  "Win32_Networking_WinHttp",
   "Win32_Storage_EnhancedStorage",
   "Win32_Storage_FileSystem",
   "Win32_Storage_Packaging_Appx",

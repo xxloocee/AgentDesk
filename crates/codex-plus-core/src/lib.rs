@@ -1,15 +1,35 @@
 pub mod ads;
+pub mod aggregate_catalog;
+pub mod agent_cache;
+pub mod agent_mcp;
+pub mod agent_collaboration;
+pub mod agent_pet;
+pub mod anthropic_bridge;
 pub mod app_paths;
 pub mod assets;
+pub mod auto_takeover;
 pub mod bridge;
 pub mod ccs_import;
 pub mod cdp;
+pub mod claude_hooks;
+pub mod claude_localization;
 pub mod codex_app_state;
 pub mod codex_home;
 pub mod codex_local_storage;
 pub mod codex_sqlite;
+pub mod browser_use;
+pub mod computer_use;
+pub mod window_capture;
+pub mod computer_use_approval;
+pub mod computer_use_js;
+pub mod computer_use_tools;
+pub mod cu_activity;
+pub mod computer_use_proxy;
+pub mod disclaimed_spawn;
 pub mod connect;
+pub(crate) mod context_usage;
 pub mod diagnostic_log;
+pub mod dictation;
 pub mod dream_skin;
 pub mod dream_skin_community;
 pub mod dream_skin_library;
@@ -17,44 +37,68 @@ pub mod dream_skin_market;
 pub mod dream_skin_package;
 pub mod dream_skin_runtime;
 pub mod env_conflicts;
+pub mod gateway;
 pub mod grok_config;
+pub mod global_dictation;
 pub mod http_client;
 pub mod install;
 pub mod launcher;
+pub mod manager_navigation;
 pub mod mcp_config;
 pub mod model_catalog;
+pub mod model_pricing;
 pub mod model_suffix;
 pub mod models;
-pub mod native_menu;
+pub mod multi_worker;
+pub mod native_browser;
+pub mod native_browser_connection;
+pub(crate) mod native_fast;
+pub mod official_login;
+pub mod packaged_launch;
 pub mod paths;
-pub mod plugin_marketplace;
 pub mod ports;
+// 独立插件市场按需下载安装，不调用原生授权安装流程。
+pub mod plugin_market;
 pub mod protocol_proxy;
 pub mod provider_import;
 pub mod proxy;
 pub mod relay_config;
 pub mod relay_environment;
+pub mod relay_features;
+pub mod relay_proxy;
+pub mod relay_headers;
 pub mod relay_rotation;
 pub mod relay_switch;
 pub mod remote_control_recovery;
+pub mod request_log;
+pub mod resident_helper;
+pub(crate) mod responses_exec;
+pub(crate) mod responses_exec_sse;
+pub(crate) mod responses_exec_transport;
 pub mod routes;
 pub mod script_market;
-pub mod share;
 pub mod session_share;
+pub mod side_chat;
 pub mod settings;
+pub mod settings_catalog;
+pub mod share;
 pub mod skills;
 pub mod status;
 pub mod stepwise;
 pub mod sub2api;
+pub mod tools;
 pub mod update;
-pub mod upstream_worktree;
 pub mod user_scripts;
 pub mod version;
 pub mod vision;
 pub mod watcher;
-#[cfg(windows)]
+pub mod work_view;
+// 不加 `#[cfg(windows)]`：模块内部各项已各自标注平台门控，在非 Windows 平台上
+// 是一个只含少数无平台依赖项（如 current_process_is_elevated 的桩实现）的空模块。
+// 门控在模块级会导致 `if cfg!(windows)` 这类运行时分支在非 Windows 平台找不到符号。
 mod windows_integration;
-pub mod zed_remote;
+#[cfg(windows)]
+mod windows_taskbar;
 
 #[cfg(windows)]
 pub fn windows_create_no_window() -> u32 {
@@ -71,12 +115,19 @@ pub fn windows_activate_process_window(process_id: u32) -> bool {
     windows_integration::activate_process_window(process_id)
 }
 
+/// 设置 Codex++ 任务栏分组、名称和重启入口，保留 Codex 自己的图标。
+#[cfg(windows)]
+pub fn windows_apply_codexplusplus_taskbar_to_process_window(process_id: u32) -> bool {
+    windows_integration::apply_codexplusplus_taskbar_to_process_window(process_id)
+}
+
+/// 兼容旧调用方；图标参数不再使用，行为与任务栏接口一致。
 #[cfg(windows)]
 pub fn windows_apply_codexplusplus_icon_to_process_window(
     process_id: u32,
-    icon_resource_path: std::path::PathBuf,
+    _icon_resource_path: std::path::PathBuf,
 ) -> bool {
-    windows_integration::apply_codexplusplus_icon_to_process_window(process_id, icon_resource_path)
+    windows_apply_codexplusplus_taskbar_to_process_window(process_id)
 }
 
 #[cfg(windows)]

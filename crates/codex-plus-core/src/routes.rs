@@ -67,6 +67,11 @@ pub trait BridgeSettingsService: Send + Sync {
     async fn codex_app_version(&self) -> anyhow::Result<String> {
         Ok(String::new())
     }
+
+    /// Agent 桌宠图片缓存目录；测试可覆盖成临时目录，避免写进真实状态目录。
+    fn agent_pet_cache_dir(&self) -> PathBuf {
+        crate::agent_pet::default_cache_dir()
+    }
 }
 
 #[async_trait]
@@ -82,28 +87,87 @@ pub trait BridgeRuntimeService: Send + Sync {
     async fn set_user_script_enabled(&self, key: String, enabled: bool) -> anyhow::Result<Value>;
     async fn delete_user_script(&self, key: String) -> anyhow::Result<Value>;
     async fn reload_user_scripts(&self) -> anyhow::Result<Value>;
+    async fn load_user_scripts(&self) -> anyhow::Result<Value> {
+        self.user_script_inventory().await
+    }
+    /// 列出拓展可注入的 Codex 页面。默认关闭，具体 runtime 再接 CDP。
+    async fn cdp_targets(&self) -> anyhow::Result<Value> {
+        anyhow::bail!("CDP targets are unavailable")
+    }
+    /// 在指定 Codex 页面执行表达式。默认关闭。
+    async fn cdp_evaluate(&self, _payload: Value) -> anyhow::Result<Value> {
+        anyhow::bail!("CDP evaluate is unavailable")
+    }
+    /// 拉市场清单，并合并本地已安装状态。
+    async fn script_market_list(&self) -> anyhow::Result<Value> {
+        anyhow::bail!("script market is unavailable")
+    }
+    /// 按 id 从市场安装脚本。
+    async fn script_market_install(&self, _payload: Value) -> anyhow::Result<Value> {
+        anyhow::bail!("script market is unavailable")
+    }
+    /// 独立插件市场只读取索引，安装时才获取目标插件。
+    async fn plugin_market_list(&self, payload: Value) -> anyhow::Result<Value> {
+        crate::plugin_market::list_plugins(
+            &crate::codex_home::default_codex_home_dir(),
+            payload
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("public"),
+            payload
+                .get("refresh")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+        .await
+    }
+    async fn plugin_market_install(&self, payload: Value) -> anyhow::Result<Value> {
+        crate::plugin_market::install_plugin(
+            &crate::codex_home::default_codex_home_dir(),
+            payload
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("public"),
+            payload
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
+        .await
+    }
+    async fn plugin_market_install_status(&self, payload: Value) -> anyhow::Result<Value> {
+        crate::plugin_market::install_status(
+            &crate::codex_home::default_codex_home_dir(),
+            payload
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("public"),
+            payload
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
+    }
+    /// 注入层适配原生插件页面的列表、详情与安装协议。
+    async fn plugin_market_native(&self, payload: Value) -> anyhow::Result<Value> {
+        crate::plugin_market::native_request(
+            &crate::codex_home::default_codex_home_dir(),
+            payload
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            payload.get("params").cloned().unwrap_or_else(|| json!({})),
+        )
+        .await
+    }
     async fn open_devtools(&self) -> anyhow::Result<Value>;
-    async fn open_manager(&self) -> anyhow::Result<Value>;
-    async fn open_transient_manager(&self) -> anyhow::Result<Value> {
-        self.open_manager().await
+    async fn open_manager(&self, payload: Value) -> anyhow::Result<Value>;
+    async fn open_transient_manager(&self, payload: Value) -> anyhow::Result<Value> {
+        self.open_manager(payload).await
     }
     async fn backend_status(&self) -> anyhow::Result<Value>;
     async fn codex_model_catalog(&self) -> anyhow::Result<Value>;
     async fn ads(&self) -> anyhow::Result<Value>;
-    async fn create_share(&self, payload: Value) -> anyhow::Result<Value> {
-        crate::share::create_share(payload).await
-    }
-    async fn zed_remote_status(&self) -> anyhow::Result<Value>;
-    async fn resolve_zed_remote_host(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn fallback_zed_remote_request(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn open_zed_remote(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn list_zed_remote_projects(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn remember_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn forget_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn upstream_worktree_status(&self) -> anyhow::Result<Value>;
-    async fn upstream_worktree_defaults(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn upstream_worktree_prepare(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn upstream_worktree_create(&self, payload: Value) -> anyhow::Result<Value>;
 }
 
 #[async_trait]
@@ -112,6 +176,11 @@ pub trait BridgeDataService: Send + Sync {
     async fn undo(&self, undo_token: String) -> anyhow::Result<DeleteResult>;
     async fn export_markdown(&self, session: SessionRef) -> anyhow::Result<ExportResult>;
     async fn thread_usage_history(&self, session: SessionRef) -> anyhow::Result<Value>;
+    /// Codex 输入框下方状态栏的轻量用量快照：只给最近的 token 事件，不返回全量历史。
+    /// 内置状态栏专用，不进第三方拓展路由白名单。
+    async fn thread_usage_live(&self, _session: SessionRef) -> anyhow::Result<Value> {
+        Ok(json!({"status": "unavailable", "message": "本机用量快照暂不可用", "events": []}))
+    }
     async fn find_archived_thread_by_title(
         &self,
         title: String,
@@ -119,12 +188,57 @@ pub trait BridgeDataService: Send + Sync {
     async fn recover_remote_control_session(&self, _thread_id: String) -> anyhow::Result<Value> {
         anyhow::bail!("Remote Control session recovery is unavailable")
     }
-    async fn export_session_file(&self, _session: SessionRef) -> anyhow::Result<Value> {
-        anyhow::bail!("Session file export is unavailable")
+}
+
+/// 拓展脚本在独立 Codex 页面（例如宠物 overlay）执行表达式。
+/// 只走 Runtime.evaluate，且必须指定 kind 或 target_id，避免误打到管理页。
+pub const EXTENSION_CDP_EXPRESSION_MAX_BYTES: usize = 256 * 1024;
+
+fn nonempty_payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub async fn evaluate_extension_cdp(debug_port: u16, payload: &Value) -> anyhow::Result<Value> {
+    let expression = nonempty_payload_str(payload, "expression")
+        .ok_or_else(|| anyhow::anyhow!("expression 不能为空"))?;
+    if expression.len() > EXTENSION_CDP_EXPRESSION_MAX_BYTES {
+        anyhow::bail!(
+            "expression 超过 {} 字节上限",
+            EXTENSION_CDP_EXPRESSION_MAX_BYTES
+        );
     }
-    async fn import_session_file(&self, _payload: Value) -> anyhow::Result<Value> {
-        anyhow::bail!("Session file import is unavailable")
+    let target_id = nonempty_payload_str(payload, "target_id")
+        .or_else(|| nonempty_payload_str(payload, "targetId"));
+    let kind = nonempty_payload_str(payload, "kind");
+    let targets = crate::cdp::list_targets(debug_port).await?;
+    let selected = crate::cdp::select_extension_cdp_targets(&targets, target_id, kind)?;
+    let mut results = Vec::new();
+    for target in selected {
+        let websocket = target
+            .web_socket_debugger_url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("CDP 页面没有 WebSocket URL"))?;
+        let result = match crate::bridge::evaluate_script_return_by_value(websocket, expression)
+            .await
+        {
+            Ok(response) => json!({
+                "id": target.id,
+                "ok": true,
+                "value": response.pointer("/result/result/value").cloned().unwrap_or(Value::Null),
+            }),
+            Err(error) => json!({
+                "id": target.id,
+                "ok": false,
+                "error": error.to_string(),
+            }),
+        };
+        results.push(result);
     }
+    Ok(json!({ "status": "ok", "results": results }))
 }
 
 pub async fn handle_bridge_request(
@@ -145,9 +259,36 @@ pub async fn handle_bridge_request(
     );
     let result = match path {
         "/settings/get" => settings_value(&ctx, ctx.settings.get_settings().await).await,
-        "/settings/set" => {
-            settings_value(&ctx, ctx.settings.set_settings(payload.clone()).await).await
+        "/dictation/status" => ctx.settings.get_settings().await.map(|settings| {
+            let effective = crate::dictation::effective_settings(&settings);
+            let mut status = crate::dictation::public_status(&effective);
+            if effective.enabled {
+                status["helperToken"] = json!(crate::dictation::helper_token());
+            }
+            status
+        }),
+        "/dictation/transcribe" => match ctx.settings.get_settings().await {
+            Ok(settings) => crate::dictation::transcribe_bridge(
+                &crate::dictation::effective_settings(&settings),
+                &payload,
+            )
+            .await
+            .map_err(anyhow::Error::from),
+            Err(_) => Err(anyhow::anyhow!("无法读取语音设置")),
+        },
+        "/dictation/cancel" => {
+            crate::dictation::cancel_bridge(&payload).map_err(anyhow::Error::from)
         }
+        "/settings/set" => {
+            let result = ctx.settings.set_settings(payload.clone()).await;
+            // Codex 设置页改了设置：通知管理器重新读取，两边开关保持一致。
+            if result.is_ok() {
+                crate::settings::notify_external_settings_change();
+            }
+            settings_value(&ctx, result).await
+        }
+        // 只读：设置项清单（标题、说明、分组等），注入页据此生成设置行。
+        "/settings/catalog" => crate::settings_catalog::enhancement_settings_catalog(),
         "/user-scripts/list" => {
             ctx.runtime
                 .user_script_inventory_with_runtime_status(payload.clone())
@@ -180,10 +321,13 @@ pub async fn handle_bridge_request(
                 .to_string();
             ctx.runtime.delete_user_script(key).await
         }
+        "/user-scripts/load" => ctx.runtime.load_user_scripts().await,
         "/user-scripts/reload" => ctx.runtime.reload_user_scripts().await,
+        "/cdp/targets" => ctx.runtime.cdp_targets().await,
+        "/cdp/evaluate" => ctx.runtime.cdp_evaluate(payload.clone()).await,
         "/devtools/open" => ctx.runtime.open_devtools().await,
-        "/manager/open" => ctx.runtime.open_manager().await,
-        "/manager/open-transient" => ctx.runtime.open_transient_manager().await,
+        "/manager/open" => ctx.runtime.open_manager(payload.clone()).await,
+        "/manager/open-transient" => ctx.runtime.open_transient_manager(payload.clone()).await,
         "/backend/status" => backend_status_value(
             ctx.runtime.backend_status().await,
             ctx.settings.get_settings().await,
@@ -192,34 +336,16 @@ pub async fn handle_bridge_request(
         "/diagnostics/log" => diagnostic_log_value(payload.clone()),
         "/llm-proxy" => llm_proxy_value(payload.clone()).await,
         "/ads" => ctx.runtime.ads().await,
-        "/share/create" => ctx.runtime.create_share(payload.clone()).await,
-        "/zed-remote/status" => ctx.runtime.zed_remote_status().await,
-        "/zed-remote/resolve-host" => ctx.runtime.resolve_zed_remote_host(payload.clone()).await,
-        "/zed-remote/fallback-request" => {
+        "/script-market/list" => ctx.runtime.script_market_list().await,
+        "/script-market/install" => ctx.runtime.script_market_install(payload.clone()).await,
+        "/plugin-market/list" => ctx.runtime.plugin_market_list(payload.clone()).await,
+        "/plugin-market/install" => ctx.runtime.plugin_market_install(payload.clone()).await,
+        "/plugin-market/install-status" => {
             ctx.runtime
-                .fallback_zed_remote_request(payload.clone())
+                .plugin_market_install_status(payload.clone())
                 .await
         }
-        "/zed-remote/open" => ctx.runtime.open_zed_remote(payload.clone()).await,
-        "/zed-remote/projects" => ctx.runtime.list_zed_remote_projects(payload.clone()).await,
-        "/zed-remote/remember-project" => {
-            ctx.runtime
-                .remember_zed_remote_project(payload.clone())
-                .await
-        }
-        "/zed-remote/forget-project" => {
-            ctx.runtime.forget_zed_remote_project(payload.clone()).await
-        }
-        "/upstream-worktree/status" => ctx.runtime.upstream_worktree_status().await,
-        "/upstream-worktree/defaults" => {
-            ctx.runtime
-                .upstream_worktree_defaults(payload.clone())
-                .await
-        }
-        "/upstream-worktree/prepare" => {
-            ctx.runtime.upstream_worktree_prepare(payload.clone()).await
-        }
-        "/upstream-worktree/create" => ctx.runtime.upstream_worktree_create(payload.clone()).await,
+        "/plugin-market/native" => ctx.runtime.plugin_market_native(payload.clone()).await,
         "/stepwise/settings" => stepwise_settings_value(ctx.settings.get_settings().await),
         "/stepwise/generate" => {
             stepwise_generate_value(ctx.settings.get_settings().await, payload.clone()).await
@@ -227,7 +353,13 @@ pub async fn handle_bridge_request(
         "/stepwise/test" => {
             stepwise_test_value(ctx.settings.get_settings().await, payload.clone()).await
         }
-        "/delete" => result_value(ctx.data.delete(session_from_payload(&payload)).await),
+        "/delete" => {
+            let session = session_from_payload(&payload);
+            match session.require_local_delete() {
+                Ok(()) => result_value(ctx.data.delete(session).await),
+                Err(error) => Err(error),
+            }
+        }
         "/undo" => {
             let undo_token = payload
                 .get("undo_token")
@@ -246,6 +378,36 @@ pub async fn handle_bridge_request(
                 .thread_usage_history(session_from_payload(&payload))
                 .await
         }
+        "/thread-usage-live" => {
+            ctx.data
+                .thread_usage_live(session_from_payload(&payload))
+                .await
+        }
+        // 仅内置 Agent 桌宠使用，不加入第三方拓展路由白名单。payload 忽略，只按当前设置取图。
+        "/agent-pet/image" => match ctx.settings.get_settings().await {
+            Ok(settings) if crate::agent_pet::enabled_for(&settings.agent_pet, "codex") => {
+                let pet = &settings.agent_pet;
+                match crate::agent_pet::load_image(
+                    &pet.image,
+                    &pet.custom_image_url,
+                    &ctx.settings.agent_pet_cache_dir(),
+                )
+                .await
+                {
+                    Ok(image) => Ok(json!({
+                        "status": "ok",
+                        "image": image.data_uri,
+                        "id": pet.image,
+                    })),
+                    Err(error) => Ok(json!({"status": "failed", "message": format!("{error:#}")})),
+                }
+            }
+            Ok(_) => Ok(json!({"status": "disabled"})),
+            Err(error) => Ok(json!({
+                "status": "failed",
+                "message": format!("无法读取 Agent 桌宠设置：{error}"),
+            })),
+        },
         "/archived-thread" => {
             let title = payload
                 .get("title")
@@ -263,11 +425,40 @@ pub async fn handle_bridge_request(
                 .to_string();
             ctx.data.recover_remote_control_session(thread_id).await
         }
-        "/session/export" => ctx
-            .data
-            .export_session_file(session_from_payload(&payload))
-            .await,
-        "/session/import" => ctx.data.import_session_file(payload.clone()).await,
+        "/side-chat/source" | "/side-chat/save" => {
+            let request = payload.clone();
+            let operation = if path == "/side-chat/source" {
+                crate::side_chat::source_snapshot
+            } else {
+                crate::side_chat::save
+            };
+            tokio::task::spawn_blocking(move || {
+                operation(&crate::codex_home::default_codex_home_dir(), &request)
+            })
+            .await
+            .unwrap_or_else(|error| Err(anyhow::anyhow!(error.to_string())))
+        }
+        "/proxy-status" => {
+            // 代理进程的实时请求状态只存在管理器内存里；桥接进程通过本地 helper
+            // 的只读路由取一份快照，供 Codex 页面里的状态条轮询。
+            let client = reqwest::Client::new();
+            match client
+                .post("http://127.0.0.1:57321/proxy-status")
+                .json(&serde_json::json!({}))
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+            {
+                Ok(response) => response
+                    .json::<Value>()
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string())),
+                Err(error) => Ok(serde_json::json!({
+                    "status": "failed",
+                    "message": error.to_string()
+                })),
+            }
+        }
         _ => {
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "bridge.unknown_path",
@@ -283,7 +474,13 @@ pub async fn handle_bridge_request(
         }
     };
 
-    let response = result.unwrap_or_else(|error| failed_from_error(&payload, error));
+    let response = result.unwrap_or_else(|error| {
+        if matches!(path, "/dictation/transcribe" | "/dictation/cancel") {
+            failed_from_error(&Value::Null, error)
+        } else {
+            failed_from_error(&payload, error)
+        }
+    });
     let _ = crate::diagnostic_log::append_diagnostic_log(
         "bridge.response",
         json!({
@@ -429,18 +626,61 @@ impl BridgeRuntimeService for CoreRuntimeService {
         }
     }
 
+    async fn load_user_scripts(&self) -> anyhow::Result<Value> {
+        if let (Some(user_scripts), Some(websocket_url), Some(evaluator)) = (
+            &self.user_scripts,
+            self.websocket_url.as_deref(),
+            &self.user_script_evaluator,
+        ) {
+            evaluator(websocket_url, &user_scripts.build_initial_bundle()?)?;
+        } else {
+            anyhow::bail!("Codex 页面尚未连接");
+        }
+        self.user_script_inventory().await
+    }
+
+    async fn script_market_list(&self) -> anyhow::Result<Value> {
+        let Some(user_scripts) = &self.user_scripts else {
+            anyhow::bail!("用户脚本目录不可用");
+        };
+        crate::script_market::list_market_scripts(user_scripts).await
+    }
+
+    async fn script_market_install(&self, payload: Value) -> anyhow::Result<Value> {
+        let Some(user_scripts) = &self.user_scripts else {
+            anyhow::bail!("用户脚本目录不可用");
+        };
+        let id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if id.is_empty() {
+            anyhow::bail!("脚本 id 不能为空");
+        }
+        crate::script_market::install_market_script_by_id(user_scripts, id).await
+    }
+
     async fn reload_user_scripts(&self) -> anyhow::Result<Value> {
         if let (Some(user_scripts), Some(websocket_url), Some(evaluator)) = (
             &self.user_scripts,
             self.websocket_url.as_deref(),
             &self.user_script_evaluator,
         ) {
-            let bundle = user_scripts.build_enabled_bundle()?;
-            if !bundle.trim().is_empty() {
-                evaluator(websocket_url, &bundle)?;
-            }
+            let bundle = user_scripts.build_reload_bundle()?;
+            evaluator(websocket_url, &bundle)?;
+        } else {
+            anyhow::bail!("Codex 页面尚未连接");
         }
         self.user_script_inventory().await
+    }
+
+    async fn cdp_targets(&self) -> anyhow::Result<Value> {
+        crate::cdp::list_extension_cdp_targets(self.debug_port).await
+    }
+
+    async fn cdp_evaluate(&self, payload: Value) -> anyhow::Result<Value> {
+        evaluate_extension_cdp(self.debug_port, &payload).await
     }
 
     async fn open_devtools(&self) -> anyhow::Result<Value> {
@@ -459,23 +699,39 @@ impl BridgeRuntimeService for CoreRuntimeService {
         }))
     }
 
-    async fn open_manager(&self) -> anyhow::Result<Value> {
-        let target = crate::install::spawn_companion(
-            crate::install::MANAGER_BINARY,
-            std::iter::empty::<&str>(),
-        )?;
+    async fn open_manager(&self, payload: Value) -> anyhow::Result<Value> {
+        let navigation =
+            crate::manager_navigation::save_pending_manager_navigation_from_payload(&payload)?;
+        let target = crate::install::open_or_activate_manager().map_err(|error| {
+            crate::manager_navigation::rollback_pending_manager_navigation_after_launch_failure(
+                navigation.as_ref(),
+                error,
+            )
+        })?;
         Ok(json!({
             "status": "ok",
-            "path": target
+            "path": target,
+            "navigation": navigation
         }))
     }
 
-    async fn open_transient_manager(&self) -> anyhow::Result<Value> {
-        let target =
-            crate::install::spawn_companion(crate::install::MANAGER_BINARY, ["--transient"])?;
+    async fn open_transient_manager(&self, payload: Value) -> anyhow::Result<Value> {
+        let navigation =
+            crate::manager_navigation::save_pending_manager_navigation_from_payload(&payload)?;
+        let target = crate::install::spawn_companion(
+            crate::install::MANAGER_BINARY,
+            ["--transient"],
+        )
+        .map_err(|error| {
+            crate::manager_navigation::rollback_pending_manager_navigation_after_launch_failure(
+                navigation.as_ref(),
+                error,
+            )
+        })?;
         Ok(json!({
             "status": "ok",
-            "path": target
+            "path": target,
+            "navigation": navigation
         }))
     }
 
@@ -497,56 +753,6 @@ impl BridgeRuntimeService for CoreRuntimeService {
 
     async fn ads(&self) -> anyhow::Result<Value> {
         crate::ads::fetch_ad_list().await
-    }
-
-    async fn zed_remote_status(&self) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::zed_remote_status())
-    }
-
-    async fn resolve_zed_remote_host(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::resolve_ssh_target_response(&payload))
-    }
-
-    async fn fallback_zed_remote_request(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::fallback_open_request_response(&payload))
-    }
-
-    async fn open_zed_remote(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::open_zed_remote(&payload))
-    }
-
-    async fn list_zed_remote_projects(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::list_zed_remote_projects_response(
-            &payload,
-        ))
-    }
-
-    async fn remember_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::remember_zed_remote_project_response(
-            &payload,
-        ))
-    }
-
-    async fn forget_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::forget_zed_remote_project_response(
-            &payload,
-        ))
-    }
-
-    async fn upstream_worktree_status(&self) -> anyhow::Result<Value> {
-        Ok(crate::upstream_worktree::status_response())
-    }
-
-    async fn upstream_worktree_defaults(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::upstream_worktree::defaults_response(&payload))
-    }
-
-    async fn upstream_worktree_prepare(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::upstream_worktree::prepare_response(&payload))
-    }
-
-    async fn upstream_worktree_create(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::upstream_worktree::create_response(&payload))
     }
 }
 
@@ -602,17 +808,48 @@ impl BridgeDataService for UnavailableDataService {
 }
 
 fn settings_payload_value(
-    settings: BackendSettings,
+    mut settings: BackendSettings,
     codex_app_version: String,
 ) -> anyhow::Result<Value> {
+    let managed_session_connection = managed_session_connection(&settings);
     let active_relay_session_provider = settings.active_relay_session_provider();
     let active_relay_codex_provider = crate::model_catalog::codex_model_provider_for_relay_profile(
         &crate::relay_config::default_codex_home_dir(),
         &settings.active_relay_profile(),
     );
+    settings.dictation = crate::dictation::effective_settings(&settings);
+    let native_fast = crate::native_fast::runtime_settings(&settings);
     let mut value = serde_json::to_value(settings)?;
+    fn remove_named_keys(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("apiKeys");
+                for child in object.values_mut() {
+                    remove_named_keys(child);
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    remove_named_keys(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    remove_named_keys(&mut value);
     if let Some(object) = value.as_object_mut() {
         object.remove("codexAppStepwiseApiKey");
+        if let Some(dictation) = object.get_mut("dictation").and_then(Value::as_object_mut) {
+            let configured = dictation
+                .remove("apiKey")
+                .and_then(|value| value.as_str().map(|value| !value.trim().is_empty()))
+                .unwrap_or(false);
+            dictation.insert("apiKeyConfigured".to_string(), json!(configured));
+        }
+        object.insert(
+            "managedSessionConnection".to_string(),
+            managed_session_connection,
+        );
         object.insert(
             "activeRelaySessionProvider".to_string(),
             Value::String(active_relay_session_provider.as_str().to_string()),
@@ -625,8 +862,136 @@ fn settings_payload_value(
             "codexAppVersion".to_string(),
             Value::String(codex_app_version),
         );
+        object.insert(
+            "nativeFastLocalApiConfigured".to_string(),
+            Value::Bool(native_fast.native_fast_local_api_configured),
+        );
     }
     Ok(value)
+}
+
+fn managed_session_connection(settings: &BackendSettings) -> Value {
+    // 固定所有自定义会话聚合的本地传输，模型聚合与故障转移共用这一入口。
+    // 不要把成员的真实认证信息下发给 renderer。
+    let Some(aggregate) = settings.active_aggregate_relay_profile() else {
+        return Value::Null;
+    };
+    if !settings.relay_profiles_enabled
+        || aggregate.session_provider != crate::settings::RelaySessionProvider::Custom
+        || aggregate.sync_default_member_login
+    {
+        return Value::Null;
+    }
+    json!({
+        "profileId": settings.active_relay_id,
+        "provider": "codex_plus_managed",
+        "baseUrl": crate::protocol_proxy::local_responses_proxy_base_url(
+            crate::protocol_proxy::protocol_proxy_port()
+        ),
+    })
+}
+
+#[cfg(test)]
+mod dictation_privacy_tests {
+    use super::*;
+
+    #[test]
+    fn managed_session_connection_uses_settings_and_local_proxy_only() {
+        use crate::settings::{AggregateRelayProfile, RelayMode, RelayProfile, RelaySessionProvider};
+        let mut settings = BackendSettings {
+            relay_profiles_enabled: true,
+            active_relay_id: "aggregate".to_string(),
+            relay_profiles: vec![RelayProfile {
+                id: "aggregate".to_string(),
+                relay_mode: RelayMode::Aggregate,
+                ..RelayProfile::default()
+            }],
+            aggregate_relay_profiles: vec![AggregateRelayProfile {
+                id: "aggregate".to_string(),
+                name: String::new(),
+                session_provider: RelaySessionProvider::Custom,
+                model_aggregation_enabled: true,
+                strategy: Default::default(),
+                members: Vec::new(),
+                routes: Vec::new(),
+                default_relay_id: String::new(),
+                sync_default_member_login: false,
+            }],
+            ..BackendSettings::default()
+        };
+        let connection = managed_session_connection(&settings);
+        assert_eq!(connection["profileId"], "aggregate");
+        assert_eq!(connection["provider"], "codex_plus_managed");
+        assert_eq!(
+            connection["baseUrl"],
+            crate::protocol_proxy::local_responses_proxy_base_url(
+                crate::protocol_proxy::protocol_proxy_port()
+            )
+        );
+        assert_eq!(connection.as_object().unwrap().len(), 3);
+        // 模型聚合开关、故障转移策略及默认选择不改变本地会话连接地址。
+        settings.aggregate_relay_profiles[0].model_aggregation_enabled = false;
+        settings.aggregate_relay_profiles[0].strategy =
+            crate::settings::AggregateRelayStrategy::Failover;
+        settings.aggregate_relay_profiles[0].default_relay_id = "new-default".to_string();
+        settings.relay_profiles[0].model = "new-model".to_string();
+        assert_eq!(managed_session_connection(&settings), connection);
+        settings.aggregate_relay_profiles[0].sync_default_member_login = true;
+        assert!(managed_session_connection(&settings).is_null());
+        settings.aggregate_relay_profiles[0].sync_default_member_login = false;
+        settings.aggregate_relay_profiles[0].session_provider = RelaySessionProvider::Openai;
+        assert!(managed_session_connection(&settings).is_null());
+        settings.aggregate_relay_profiles[0].session_provider = RelaySessionProvider::Custom;
+        settings.relay_profiles_enabled = false;
+        assert!(managed_session_connection(&settings).is_null());
+    }
+
+    #[test]
+    fn settings_bridge_preserves_session_share_choice_for_renderer_master_gating() {
+        for enabled in [false, true] {
+            let settings = BackendSettings {
+                codex_app_session_share: enabled,
+                enhancements_enabled: false,
+                ..BackendSettings::default()
+            };
+            let result = settings_payload_value(settings, String::new()).unwrap();
+            assert_eq!(result["codexAppSessionShare"], enabled);
+            assert_eq!(result["enhancementsEnabled"], false);
+        }
+    }
+
+    #[test]
+    fn dictation_settings_bridge_removes_asr_key() {
+        let mut settings = BackendSettings::default();
+        settings.dictation.api_key = "fake-asr-private-key".to_string();
+        let result = settings_payload_value(settings, String::new()).unwrap();
+        assert!(result["dictation"].get("apiKey").is_none());
+        assert_eq!(result["dictation"]["apiKeyConfigured"], true);
+        assert!(!result.to_string().contains("fake-asr-private-key"));
+    }
+
+    #[test]
+    fn settings_bridge_never_returns_named_key_lists() {
+        let mut settings = BackendSettings::default();
+        settings.relay_profiles[0].api_keys = vec![crate::settings::RelayApiKey {
+            id: "backup".into(), name: "备用".into(), api_key: "fake-backup-secret".into(),
+        }];
+        let result = settings_payload_value(settings, String::new()).unwrap();
+        assert!(result["relayProfiles"][0].get("apiKeys").is_none());
+        assert!(!result.to_string().contains("fake-backup-secret"));
+    }
+    #[test]
+    fn dictation_settings_bridge_applies_enhancement_switch_without_mutating_settings() {
+        let mut settings = BackendSettings::default();
+        settings.enhancements_enabled = false;
+        settings.dictation.enabled = true;
+        settings.dictation.api_key = "fake-asr-private-key".to_string();
+        let result = settings_payload_value(settings.clone(), String::new()).unwrap();
+        assert_eq!(result["dictation"]["enabled"], false);
+        assert_eq!(result["dictation"]["apiKeyConfigured"], true);
+        assert!(settings.dictation.enabled);
+        assert_eq!(settings.dictation.api_key, "fake-asr-private-key");
+    }
 }
 
 async fn settings_value(
@@ -903,6 +1268,23 @@ fn failed_from_error(payload: &Value, error: anyhow::Error) -> Value {
 }
 
 fn session_from_payload(payload: &Value) -> SessionRef {
+    let parse_host = |value: &Value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(ToString::to_string)
+    };
+    // 双名称不一致同样属于未知来源，不能通过优先读取某个字段放宽归属。
+    let host_id = match (payload.get("host_id"), payload.get("hostId")) {
+        (Some(left), Some(right)) => {
+            let left = parse_host(left);
+            let right = parse_host(right);
+            if left == right { left } else { None }
+        }
+        (Some(value), None) | (None, Some(value)) => parse_host(value),
+        _ => None,
+    };
     SessionRef {
         session_id: payload
             .get("session_id")
@@ -914,6 +1296,7 @@ fn session_from_payload(payload: &Value) -> SessionRef {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        host_id,
     }
 }
 
@@ -928,4 +1311,94 @@ fn empty_user_script_inventory() -> Value {
         "enabled": true,
         "scripts": []
     })
+}
+
+#[cfg(test)]
+mod dictation_bridge_route_tests {
+    use super::*;
+
+    struct IsolatedSettings(BackendSettings);
+
+    #[async_trait]
+    impl BridgeSettingsService for IsolatedSettings {
+        async fn get_settings(&self) -> anyhow::Result<BackendSettings> {
+            Ok(self.0.clone())
+        }
+        async fn set_settings(&self, _payload: Value) -> anyhow::Result<BackendSettings> {
+            anyhow::bail!("test settings are read-only")
+        }
+    }
+
+    fn context() -> BridgeContext {
+        BridgeContext::new(
+            Arc::new(IsolatedSettings(BackendSettings::default())),
+            Arc::new(CoreRuntimeService::new(
+                0,
+                StatusStore::new(PathBuf::from("unused-test-status.json")),
+            )),
+            Arc::new(UnavailableDataService),
+        )
+    }
+
+    #[tokio::test]
+    async fn dictation_bridge_routes_return_sanitized_failure_without_payload_echo() {
+        for route in ["/dictation/transcribe", "/dictation/cancel"] {
+            let result = handle_bridge_request(
+                context(),
+                route,
+                json!({
+                    "helperToken": "fake-secret-token",
+                    "audioBase64": "fake-secret-audio",
+                    "session_id": "fake-secret-session"
+                }),
+            )
+            .await;
+            assert_eq!(result["status"], "failed");
+            assert_eq!(result["session_id"], "");
+            assert!(!result.to_string().contains("fake-secret"));
+            assert!(result["message"].as_str().unwrap().contains("未授权"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod dictation_disabled_route_tests {
+    use super::*;
+    struct DisabledSettings;
+    #[async_trait]
+    impl BridgeSettingsService for DisabledSettings {
+        async fn get_settings(&self) -> anyhow::Result<BackendSettings> {
+            Ok(BackendSettings {
+                enhancements_enabled: false,
+                dictation: crate::settings::DictationSettings {
+                    enabled: true,
+                    api_key: "fake-asr-key".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }
+        async fn set_settings(&self, _payload: Value) -> anyhow::Result<BackendSettings> {
+            anyhow::bail!("read-only test")
+        }
+    }
+    #[tokio::test]
+    async fn dictation_bridge_disables_status_and_transcribe_when_enhancements_are_off() {
+        let ctx = BridgeContext::new(
+            Arc::new(DisabledSettings),
+            Arc::new(CoreRuntimeService::new(
+                0,
+                StatusStore::new(PathBuf::from("unused-test-status.json")),
+            )),
+            Arc::new(UnavailableDataService),
+        );
+        let status = handle_bridge_request(ctx.clone(), "/dictation/status", json!({})).await;
+        assert_eq!(status["enabled"], false);
+        assert!(status.get("helperToken").is_none());
+        let response = handle_bridge_request(ctx, "/dictation/transcribe", json!({
+            "requestId": uuid::Uuid::new_v4().to_string(), "helperToken": crate::dictation::helper_token(), "audioBase64": "AA==", "mimeType": "audio/wav"
+        })).await;
+        assert_eq!(response["status"], "failed");
+        assert!(response["message"].as_str().unwrap().contains("未启用"));
+    }
 }
