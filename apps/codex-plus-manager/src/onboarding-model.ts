@@ -15,8 +15,8 @@ export const TOUR_STORAGE_KEY = "codex-plus-plus.onboarding";
 export const TOUR_STEPS: TourStep[] = [
   {
     id: "welcome",
-    title: "欢迎使用 Codex++",
-    body: "Codex++ 让任意 Agent（Codex、Claude Code、Grok…）经同一个本地网关接入任意供应商。花半分钟认识一下各个入口。",
+    title: "欢迎使用 AgentDesk",
+    body: "AgentDesk 让任意 Agent（Codex、Claude Code、Grok…）经同一个本地网关接入任意供应商。花半分钟认识一下各个入口。",
   },
   {
     id: "hub",
